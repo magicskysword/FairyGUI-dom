@@ -14,6 +14,12 @@
       "file": "Model_fui.bytes.base64",
       "byteLength": 1086,
       "sha256": "bdbbb5cfd7eece876e26743c83fd47a0860b34218513d16826df0619c1e1c95c"
+    },
+    "HitTest": {
+      "path": "Assets/Examples/Resources/UI/HitTest_fui.bytes",
+      "file": "HitTest_fui.bytes.base64",
+      "byteLength": 4715,
+      "sha256": "13195027dd7728187e8f8853398e6a212ee0f0981ed0cd796560c4cabc03320c"
     }
   }
 }

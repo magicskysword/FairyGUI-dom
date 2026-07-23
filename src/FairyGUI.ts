@@ -31,7 +31,11 @@ export {
     UIPackageLoadError,
     UIPackageLoadErrorCode
 } from "./ui/UIPackage";
-export { PackageItem, PackageItemSprite } from "./ui/PackageItem";
+export {
+    PackageItem,
+    PackageItemSprite,
+    PackagePixelHitTestData
+} from "./ui/PackageItem";
 export {
     PackageDecoder,
     PackageDecodeError,

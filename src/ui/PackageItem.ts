@@ -18,6 +18,13 @@ export interface PackageItemSprite {
     readonly originalHeight: number;
 }
 
+export interface PackagePixelHitTestData {
+    readonly pixelWidth: number;
+    readonly scaleDenominator: number;
+    readonly scale: number;
+    readonly pixels: Uint8Array;
+}
+
 export class PackageItem {
     public owner: UIPackage;
 
@@ -41,6 +48,7 @@ export class PackageItem {
     public tileGridIndice?: number;
     public smoothing?: boolean;
     public sprite?: PackageItemSprite;
+    public pixelHitTestData?: PackagePixelHitTestData;
 
     //movieclip
     public interval?: number;

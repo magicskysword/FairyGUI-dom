@@ -5389,6 +5389,27 @@ class UIPackage {
             if (imageItem && imageItem.type === PackageItemType.Image)
                 imageItem.sprite = sprite;
         }
+        for (const decodedHitTest of decoded.pixelHitTests) {
+            const imageItem = this._itemsById[decodedHitTest.itemId];
+            if (!imageItem || imageItem.type !== PackageItemType.Image) {
+                throw packageLoadError("INVALID_PIXEL_HIT_TEST_REFERENCE", source, decoded, "Pixel hit-test data references missing or non-image item \""
+                    + decodedHitTest.itemId
+                    + "\".");
+            }
+            if (imageItem.pixelHitTestData
+                || decodedHitTest.pixelWidth <= 0
+                || decodedHitTest.scaleDenominator <= 0) {
+                throw packageLoadError("INVALID_PIXEL_HIT_TEST_DATA", source, decoded, "Pixel hit-test data for image \""
+                    + decodedHitTest.itemId
+                    + "\" is duplicated or contains non-positive dimensions.");
+            }
+            imageItem.pixelHitTestData = {
+                pixelWidth: decodedHitTest.pixelWidth,
+                scaleDenominator: decodedHitTest.scaleDenominator,
+                scale: 1 / decodedHitTest.scaleDenominator,
+                pixels: decodedHitTest.pixels.slice()
+            };
+        }
     }
     dispose() {
     }
