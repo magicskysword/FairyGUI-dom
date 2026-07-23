@@ -47,6 +47,9 @@ export {
     UIPackageResourceError
 } from "./ui/PackageResource";
 export {
+    BrowserPackageResourceResolver
+} from "./ui/BrowserPackageResourceResolver";
+export {
     PackageDecoder,
     PackageDecodeError,
     PackageBinaryData,

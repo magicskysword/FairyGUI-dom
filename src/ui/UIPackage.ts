@@ -20,6 +20,9 @@ import {
     PackageSpriteResourceRequest,
     UIPackageResourceError
 } from "./PackageResource";
+import {
+    BrowserPackageResourceResolver
+} from "./BrowserPackageResourceResolver";
 
 type PackageDependency = { id: string, name: string };
 
@@ -245,7 +248,7 @@ export class UIPackage {
         _instByName[pkg.name] = pkg;
         if (pkg.path)
             _instById[pkg.path] = pkg;
-        pkg.startResourceLoading(options.resourceResolver || null);
+        pkg.startResourceLoading(selectResourceResolver(options));
         return pkg;
     }
 
@@ -729,6 +732,16 @@ function normalizeResourceBaseURL(value: string | null | undefined): string {
     if (!value)
         return "";
     return value.endsWith("/") ? value : value + "/";
+}
+
+function selectResourceResolver(
+    options: UIPackageLoadOptions
+): PackageResourceResolver | null {
+    if (Object.prototype.hasOwnProperty.call(options, "resourceResolver"))
+        return options.resourceResolver || null;
+    if (BrowserPackageResourceResolver.isSupported())
+        return new BrowserPackageResourceResolver();
+    return null;
 }
 
 function packageLoadError(

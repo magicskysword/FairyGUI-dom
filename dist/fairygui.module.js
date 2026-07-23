@@ -5114,6 +5114,125 @@ class UIPackageResourceError extends Error {
     }
 }
 
+/**
+ * Browser resource resolver used by UIPackage when DOM image and canvas APIs
+ * are available. Atlas sprites are converted to independent PNG Blob URLs so
+ * the existing DOM Image implementation can keep using regular CSS URLs.
+ */
+class BrowserPackageResourceResolver {
+    constructor() {
+        this._images = {};
+        this._objectURLs = new Set();
+    }
+    static isSupported() {
+        return typeof document !== "undefined"
+            && typeof HTMLImageElement !== "undefined"
+            && typeof HTMLCanvasElement !== "undefined"
+            && typeof URL !== "undefined"
+            && typeof URL.createObjectURL === "function"
+            && typeof URL.revokeObjectURL === "function";
+    }
+    resolve(request) {
+        if (!BrowserPackageResourceResolver.isSupported()) {
+            return Promise.reject(new Error("Browser image, canvas, and Blob URL APIs are required."));
+        }
+        if (request.kind === "file") {
+            if (request.item.type === PackageItemType.Atlas
+                || request.item.type === PackageItemType.Image) {
+                return this.loadImage(request.sourceURL)
+                    .then(() => request.sourceURL);
+            }
+            return Promise.resolve(request.sourceURL);
+        }
+        return this.loadImage(request.sourceURL)
+            .then(image => this.createSpriteURL(image, request.sprite));
+    }
+    release(request, resolvedURL) {
+        if (!this._objectURLs.has(resolvedURL))
+            return;
+        this._objectURLs.delete(resolvedURL);
+        URL.revokeObjectURL(resolvedURL);
+    }
+    dispose() {
+        this._objectURLs.forEach(url => URL.revokeObjectURL(url));
+        this._objectURLs.clear();
+        this._images = {};
+    }
+    loadImage(url) {
+        let promise = this._images[url];
+        if (promise)
+            return promise;
+        promise = new Promise((resolve, reject) => {
+            const image = document.createElement("img");
+            image.onload = () => resolve(image);
+            image.onerror = () => reject(new Error("Cannot load image resource \"" + url + "\"."));
+            image.src = url;
+        });
+        this._images[url] = promise;
+        return promise;
+    }
+    createSpriteURL(image, sprite) {
+        if (sprite.x < 0
+            || sprite.y < 0
+            || sprite.width <= 0
+            || sprite.height <= 0
+            || sprite.x + sprite.width > image.naturalWidth
+            || sprite.y + sprite.height > image.naturalHeight) {
+            return Promise.reject(new Error("Sprite \""
+                + sprite.itemId
+                + "\" lies outside atlas bounds "
+                + image.naturalWidth
+                + "x"
+                + image.naturalHeight
+                + "."));
+        }
+        const contentWidth = sprite.rotated
+            ? sprite.height
+            : sprite.width;
+        const contentHeight = sprite.rotated
+            ? sprite.width
+            : sprite.height;
+        const outputWidth = sprite.originalWidth > 0
+            ? sprite.originalWidth
+            : contentWidth;
+        const outputHeight = sprite.originalHeight > 0
+            ? sprite.originalHeight
+            : contentHeight;
+        const canvas = document.createElement("canvas");
+        canvas.width = outputWidth;
+        canvas.height = outputHeight;
+        const context = canvas.getContext("2d");
+        if (!context) {
+            return Promise.reject(new Error("Cannot create a 2D canvas context for sprite \""
+                + sprite.itemId
+                + "\"."));
+        }
+        if (sprite.rotated) {
+            context.save();
+            context.translate(sprite.offsetX, sprite.offsetY + sprite.width);
+            context.rotate(-Math.PI / 2);
+            context.drawImage(image, sprite.x, sprite.y, sprite.width, sprite.height, 0, 0, sprite.width, sprite.height);
+            context.restore();
+        }
+        else {
+            context.drawImage(image, sprite.x, sprite.y, sprite.width, sprite.height, sprite.offsetX, sprite.offsetY, sprite.width, sprite.height);
+        }
+        return new Promise((resolve, reject) => {
+            canvas.toBlob(blob => {
+                if (!blob) {
+                    reject(new Error("Cannot encode sprite \""
+                        + sprite.itemId
+                        + "\" as PNG."));
+                    return;
+                }
+                const url = URL.createObjectURL(blob);
+                this._objectURLs.add(url);
+                resolve(url);
+            }, "image/png");
+        });
+    }
+}
+
 class UIPackageLoadError extends Error {
     constructor(code, message, source, packageId, packageName) {
         super(message);
@@ -5248,7 +5367,7 @@ class UIPackage {
         _instByName[pkg.name] = pkg;
         if (pkg.path)
             _instById[pkg.path] = pkg;
-        pkg.startResourceLoading(options.resourceResolver || null);
+        pkg.startResourceLoading(selectResourceResolver(options));
         return pkg;
     }
     static removePackage(packageIdOrName) {
@@ -5624,6 +5743,13 @@ function normalizeResourceBaseURL(value) {
     if (!value)
         return "";
     return value.endsWith("/") ? value : value + "/";
+}
+function selectResourceResolver(options) {
+    if (Object.prototype.hasOwnProperty.call(options, "resourceResolver"))
+        return options.resourceResolver || null;
+    if (BrowserPackageResourceResolver.isSupported())
+        return new BrowserPackageResourceResolver();
+    return null;
 }
 function packageLoadError(code, source, decoded, detail) {
     return new UIPackageLoadError(code, "Cannot load FairyGUI package from \""
@@ -18821,4 +18947,4 @@ class XML {
     }
 }
 
-export { AsyncOperation, AutoSizeType, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, defaultParser, distance, lerp, repeat };
+export { AsyncOperation, AutoSizeType, BrowserPackageResourceResolver, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, defaultParser, distance, lerp, repeat };
