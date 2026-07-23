@@ -1,4 +1,4 @@
-import { ObjectType, PackageItemType } from "./FieldTypes";
+import { PackageItemType } from "./FieldTypes";
 import { constructingDepth, GObject } from "./GObject";
 import { PackageItem } from "./PackageItem";
 import { ByteBuffer } from "../utils/ByteBuffer";
@@ -6,8 +6,46 @@ import { HttpRequest } from "../utils/HttpRequest";
 import { Event } from "../event/Event";
 import { Margin } from "../math/Margin";
 import { Constructor } from "../utils/ToolSet";
+import {
+    DecodedPackage,
+    PackageBinaryData,
+    PackageDecodeOptions,
+    PackageDecoder
+} from "./PackageDecoder";
 
 type PackageDependency = { id: string, name: string };
+
+export interface UIPackageLoadOptions extends PackageDecodeOptions {
+    resourceBaseURL?: string;
+}
+
+export type UIPackageLoadErrorCode =
+    | "PACKAGE_ID_CONFLICT"
+    | "PACKAGE_NAME_CONFLICT"
+    | "PACKAGE_PATH_CONFLICT";
+
+export class UIPackageLoadError extends Error {
+    public readonly code: UIPackageLoadErrorCode;
+    public readonly source: string;
+    public readonly packageId: string;
+    public readonly packageName: string;
+
+    public constructor(
+        code: UIPackageLoadErrorCode,
+        message: string,
+        source: string,
+        packageId: string,
+        packageName: string
+    ) {
+        super(message);
+        this.name = "UIPackageLoadError";
+        this.code = code;
+        this.source = source;
+        this.packageId = packageId;
+        this.packageName = packageName;
+        Object.setPrototypeOf(this, UIPackageLoadError.prototype);
+    }
+}
 
 export class UIPackage {
     private _id: string;
@@ -64,7 +102,7 @@ export class UIPackage {
     public static loadPackage(url: string): Promise<UIPackage> {
         if (!url.endsWith("/"))
             url += "/";
-        return new Promise<UIPackage>(resolve => {
+        return new Promise<UIPackage>((resolve, reject) => {
             let pkg: UIPackage = _instById[url];
             if (pkg) {
                 resolve(pkg);
@@ -74,16 +112,109 @@ export class UIPackage {
             let request = new HttpRequest();
             request.send(url + "package.xml", null, "get", "arraybuffer");
             request.on("complete", (evt: Event) => {
-                let pkg: UIPackage = new UIPackage();
-                pkg.loadPackage(new ByteBuffer(evt.data), url);
-
-                _instById[pkg.id] = pkg;
-                _instByName[pkg.name] = pkg;
-                _instById[pkg.path] = pkg;
-
-                resolve(pkg);
+                try {
+                    resolve(UIPackage.loadPackageFromBuffer(evt.data, {
+                        source: url + "package.xml",
+                        resourceBaseURL: url
+                    }));
+                }
+                catch (error) {
+                    reject(error);
+                }
+            });
+            request.on("error", (evt: Event) => {
+                reject(new Error(
+                    "Cannot load FairyGUI package \""
+                        + url
+                        + "\": "
+                        + String(evt.data)
+                ));
             });
         });
+    }
+
+    public static loadPackageFromBuffer(
+        data: PackageBinaryData,
+        options: UIPackageLoadOptions = {}
+    ): UIPackage {
+        const source = options.source || "<memory>";
+        const resourceBaseURL = normalizeResourceBaseURL(
+            options.resourceBaseURL
+        );
+        const decoded = PackageDecoder.decode(data, { source });
+        const existingById = _instById[decoded.id];
+
+        if (existingById) {
+            if (existingById.name !== decoded.name) {
+                throw packageLoadError(
+                    "PACKAGE_ID_CONFLICT",
+                    source,
+                    decoded,
+                    "Package ID \""
+                        + decoded.id
+                        + "\" is already registered by package \""
+                        + existingById.name
+                        + "\", so it cannot be reused by package \""
+                        + decoded.name
+                        + "\"."
+                );
+            }
+            if (existingById.path !== resourceBaseURL) {
+                throw packageLoadError(
+                    "PACKAGE_PATH_CONFLICT",
+                    source,
+                    decoded,
+                    "Package \""
+                        + decoded.name
+                        + "\" is already registered with resource base URL \""
+                        + existingById.path
+                        + "\", not \""
+                        + resourceBaseURL
+                        + "\"."
+                );
+            }
+            return existingById;
+        }
+
+        const existingByName = _instByName[decoded.name];
+        if (existingByName) {
+            throw packageLoadError(
+                "PACKAGE_NAME_CONFLICT",
+                source,
+                decoded,
+                "Package name \""
+                    + decoded.name
+                    + "\" is already registered with ID \""
+                    + existingByName.id
+                    + "\", not \""
+                    + decoded.id
+                    + "\"."
+            );
+        }
+
+        if (resourceBaseURL) {
+            const existingByPath = _instById[resourceBaseURL];
+            if (existingByPath) {
+                throw packageLoadError(
+                    "PACKAGE_PATH_CONFLICT",
+                    source,
+                    decoded,
+                    "Resource base URL \""
+                        + resourceBaseURL
+                        + "\" is already registered by package \""
+                        + existingByPath.name
+                        + "\"."
+                );
+            }
+        }
+
+        const pkg = new UIPackage();
+        pkg.loadDecodedPackage(decoded, resourceBaseURL);
+        _instById[pkg.id] = pkg;
+        _instByName[pkg.name] = pkg;
+        if (pkg.path)
+            _instById[pkg.path] = pkg;
+        return pkg;
     }
 
     public static removePackage(packageIdOrName: string): void {
@@ -172,164 +303,78 @@ export class UIPackage {
         return UIPackage.getItemURL(pkgName, srcName);
     }
 
-    private loadPackage(buffer: ByteBuffer, path: string): void {
-        if (buffer.readUint() != 0x46475549)
-            throw "FairyGUI: old package format found in '" + path + "'";
+    private loadDecodedPackage(
+        decoded: DecodedPackage,
+        resourceBaseURL: string
+    ): void {
+        this._path = resourceBaseURL;
+        this._id = decoded.id;
+        this._name = decoded.name;
+        this._dependencies = decoded.dependencies.map(dependency => ({
+            id: dependency.id,
+            name: dependency.name
+        }));
+        this._branches = decoded.branches.slice();
+        if (_branch)
+            this._branchIndex = this._branches.indexOf(_branch);
 
-        this._path = path;
-        buffer.version = buffer.readInt();
-        var ver2: boolean = buffer.version >= 2;
-        buffer.readBool(); //compressed
-        this._id = buffer.readString();
-        this._name = buffer.readString();
-        buffer.skip(20);
+        const branchIncluded = this._branches.length > 0;
+        const stringTable = decoded.stringTable.slice();
 
-        var indexTablePos: number = buffer.pos;
-        var cnt: number;
-        var i: number;
-        var nextPos: number;
-        var str: string;
-        var branchIncluded: boolean;
-
-        buffer.seek(indexTablePos, 4);
-
-        cnt = buffer.readInt();
-        var stringTable: Array<string> = new Array<string>(cnt);
-        buffer.stringTable = stringTable;
-
-        for (i = 0; i < cnt; i++)
-            stringTable[i] = buffer.readString();
-
-        if (buffer.seek(indexTablePos, 5)) {
-            cnt = buffer.readInt();
-            for (i = 0; i < cnt; i++) {
-                let index = buffer.readUshort();
-                let len = buffer.readInt();
-                stringTable[index] = buffer.readString(len);
-            }
-        }
-
-        buffer.seek(indexTablePos, 0);
-        cnt = buffer.readShort();
-        for (i = 0; i < cnt; i++)
-            this._dependencies.push({ id: buffer.readS(), name: buffer.readS() });
-
-        if (ver2) {
-            cnt = buffer.readShort();
-            if (cnt > 0) {
-                this._branches = buffer.readSArray(cnt);
-                if (_branch)
-                    this._branchIndex = this._branches.indexOf(_branch);
-            }
-
-            branchIncluded = cnt > 0;
-        }
-
-        buffer.seek(indexTablePos, 1);
-
-        var pi: PackageItem;
-
-        cnt = buffer.readShort();
-        for (i = 0; i < cnt; i++) {
-            nextPos = buffer.readInt();
-            nextPos += buffer.pos;
-
-            pi = new PackageItem();
+        for (const decodedItem of decoded.items) {
+            const pi = new PackageItem();
             pi.owner = this;
-            pi.type = buffer.readByte();
-            pi.id = buffer.readS();
-            pi.name = buffer.readS();
-            buffer.readS(); //path
-            pi.file = path + buffer.readS();
-            buffer.readBool();//exported
-            pi.width = buffer.readInt();
-            pi.height = buffer.readInt();
+            pi.type = decodedItem.type;
+            pi.id = decodedItem.id;
+            pi.name = decodedItem.name;
+            pi.file = decodedItem.file == null
+                ? null
+                : resourceBaseURL + decodedItem.file;
+            pi.width = decodedItem.width;
+            pi.height = decodedItem.height;
+            pi.objectType = decodedItem.objectType;
+            pi.scaleByTile = decodedItem.scaleByTile;
+            pi.tileGridIndice = decodedItem.tileGridIndice;
+            pi.smoothing = decodedItem.smoothing;
 
-            switch (pi.type) {
-                case PackageItemType.Image:
-                    {
-                        pi.objectType = ObjectType.Image;
-                        var scaleOption: number = buffer.readByte();
-                        if (scaleOption == 1) {
-                            let sx = buffer.readInt();
-                            let sy = buffer.readInt();
-                            let sw = buffer.readInt();
-                            let sh = buffer.readInt();
-                            pi.scale9Grid = new Margin();
-                            pi.scale9Grid.left = sx;
-                            pi.scale9Grid.top = sy;
-                            pi.scale9Grid.right = pi.width - sx - sw;
-                            pi.scale9Grid.bottom = pi.height - sy - sh;
-
-                            pi.tileGridIndice = buffer.readInt();
-                        }
-                        else if (scaleOption == 2)
-                            pi.scaleByTile = true;
-
-                        pi.smoothing = buffer.readBool();
-                        break;
-                    }
-
-                case PackageItemType.MovieClip:
-                    {
-                        pi.smoothing = buffer.readBool();
-                        pi.objectType = ObjectType.MovieClip;
-                        pi.rawData = buffer.readBuffer();
-                        break;
-                    }
-
-                case PackageItemType.Font:
-                    {
-                        pi.rawData = buffer.readBuffer();
-                        break;
-                    }
-
-                case PackageItemType.Component:
-                    {
-                        var extension: number = buffer.readByte();
-                        if (extension > 0)
-                            pi.objectType = extension;
-                        else
-                            pi.objectType = ObjectType.Component;
-                        pi.rawData = buffer.readBuffer();
-
-                        UIObjectFactory.resolveExtension(pi);
-                        break;
-                    }
-
-                case PackageItemType.Spine:
-                case PackageItemType.DragonBones:
-                    {
-                        buffer.readFloat();
-                        buffer.readFloat();
-                        break;
-                    }
+            if (decodedItem.scale9Grid) {
+                pi.scale9Grid = new Margin();
+                pi.scale9Grid.left = decodedItem.scale9Grid.x;
+                pi.scale9Grid.top = decodedItem.scale9Grid.y;
+                pi.scale9Grid.right = pi.width
+                    - decodedItem.scale9Grid.x
+                    - decodedItem.scale9Grid.width;
+                pi.scale9Grid.bottom = pi.height
+                    - decodedItem.scale9Grid.y
+                    - decodedItem.scale9Grid.height;
             }
 
-            if (ver2) {
-                str = buffer.readS();//branch
-                if (str)
-                    pi.name = str + "/" + pi.name;
-
-                var branchCnt: number = buffer.readByte();
-                if (branchCnt > 0) {
-                    if (branchIncluded)
-                        pi.branches = buffer.readSArray(branchCnt);
-                    else
-                        this._itemsById[buffer.readS()] = pi;
-                }
-
-                var highResCnt: number = buffer.readByte();
-                if (highResCnt > 0)
-                    pi.highResolution = buffer.readSArray(highResCnt);
+            if (decodedItem.rawData) {
+                pi.rawData = new ByteBuffer(
+                    decodedItem.rawData.buffer as ArrayBuffer,
+                    decodedItem.rawData.byteOffset,
+                    decodedItem.rawData.byteLength
+                );
+                pi.rawData.version = decoded.version;
+                pi.rawData.stringTable = stringTable;
             }
+
+            if (decodedItem.branches.length > 0) {
+                if (branchIncluded)
+                    pi.branches = decodedItem.branches.slice();
+                else
+                    this._itemsById[decodedItem.branches[0]] = pi;
+            }
+            if (decodedItem.highResolution.length > 0)
+                pi.highResolution = decodedItem.highResolution.slice();
+
+            if (pi.type === PackageItemType.Component)
+                UIObjectFactory.resolveExtension(pi);
 
             this._items.push(pi);
             this._itemsById[pi.id] = pi;
             if (pi.name != null)
                 this._itemsByName[pi.name] = pi;
-
-            buffer.pos = nextPos;
         }
     }
 
@@ -390,3 +435,27 @@ var _instById: { [index: string]: UIPackage } = {};
 var _instByName: { [index: string]: UIPackage } = {};
 var _branch: string = "";
 var _vars: { [index: string]: string } = {};
+
+function normalizeResourceBaseURL(value: string | null | undefined): string {
+    if (!value)
+        return "";
+    return value.endsWith("/") ? value : value + "/";
+}
+
+function packageLoadError(
+    code: UIPackageLoadErrorCode,
+    source: string,
+    decoded: DecodedPackage,
+    detail: string
+): UIPackageLoadError {
+    return new UIPackageLoadError(
+        code,
+        "Cannot load FairyGUI package from \""
+            + source
+            + "\": "
+            + detail,
+        source,
+        decoded.id,
+        decoded.name
+    );
+}

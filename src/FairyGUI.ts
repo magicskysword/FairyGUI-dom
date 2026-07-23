@@ -25,7 +25,12 @@ export { Controller } from "./ui/Controller";
 export { Transition } from "./ui/Transition";
 export { ScrollPane } from "./ui/ScrollPane";
 export { RelationType } from "./ui/FieldTypes";
-export { UIPackage } from "./ui/UIPackage";
+export {
+    UIPackage,
+    UIPackageLoadOptions,
+    UIPackageLoadError,
+    UIPackageLoadErrorCode
+} from "./ui/UIPackage";
 export { PackageItem } from "./ui/PackageItem";
 export {
     PackageDecoder,

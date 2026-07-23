@@ -4704,6 +4704,394 @@
         }
     }
 
+    const FGUI_MAGIC = 0x46475549;
+    const NULL_STRING_INDEX = 65534;
+    const EMPTY_STRING_INDEX = 65533;
+    const MAX_COLLECTION_SIZE = 1000000;
+    class PackageDecodeError extends Error {
+        constructor(code, message, source, offset, cause) {
+            super(message);
+            this.name = "PackageDecodeError";
+            this.code = code;
+            this.source = source;
+            this.offset = offset;
+            this.cause = cause;
+            Object.setPrototypeOf(this, PackageDecodeError.prototype);
+        }
+    }
+    /**
+     * Pure FairyGUI package decoder.
+     *
+     * It does not perform network access, mutate the UIPackage registry, or create
+     * any DOM objects. Runtime assembly is intentionally handled by UIPackage.
+     */
+    class PackageDecoder {
+        static decode(data, options = {}) {
+            const source = options.source || "<memory>";
+            const input = normalizeInput(data, source);
+            const buffer = new ByteBuffer(input.buffer, input.byteOffset, input.byteLength);
+            try {
+                if (buffer.readUint() !== FGUI_MAGIC) {
+                    throw decodeError("INVALID_MAGIC", "Expected FairyGUI magic 0x46475549.", source, 0);
+                }
+                buffer.version = buffer.readInt();
+                const compressed = buffer.readBool();
+                if (compressed) {
+                    throw decodeError("UNSUPPORTED_COMPRESSION", "Compressed FairyGUI packages are not supported yet.", source, buffer.pos - 1);
+                }
+                const id = buffer.readString();
+                const name = buffer.readString();
+                skipChecked(buffer, 20, source, input.byteOffset);
+                const indexTablePos = buffer.pos;
+                const version2 = buffer.version >= 2;
+                requireBlock(buffer, indexTablePos, 4, "string table", source);
+                const stringCount = readCount(buffer.readInt(), "string table", buffer, source, input.byteOffset);
+                const stringTable = [];
+                for (let i = 0; i < stringCount; i++)
+                    stringTable.push(buffer.readString());
+                buffer.stringTable = stringTable;
+                if (buffer.seek(indexTablePos, 5)) {
+                    const overrideCount = readCount(buffer.readInt(), "custom string table", buffer, source, input.byteOffset);
+                    for (let i = 0; i < overrideCount; i++) {
+                        const stringIndexOffset = packageOffset(buffer, input.byteOffset);
+                        const stringIndex = buffer.readUshort();
+                        if (stringIndex >= stringTable.length) {
+                            throw decodeError("INVALID_STRING_REFERENCE", "Custom string override references index "
+                                + stringIndex
+                                + ", but the string table contains "
+                                + stringTable.length
+                                + " entries.", source, stringIndexOffset);
+                        }
+                        const length = buffer.readInt();
+                        if (length < 0) {
+                            throw decodeError("INVALID_BLOCK", "Custom string length cannot be negative.", source, packageOffset(buffer, input.byteOffset) - 4);
+                        }
+                        stringTable[stringIndex] = buffer.readString(length);
+                    }
+                }
+                requireBlock(buffer, indexTablePos, 0, "dependencies", source);
+                const dependencies = [];
+                const dependencyCount = readCount(buffer.readShort(), "dependencies", buffer, source, input.byteOffset);
+                for (let i = 0; i < dependencyCount; i++) {
+                    dependencies.push({
+                        id: readStringReference(buffer, source, input.byteOffset)
+                            || "",
+                        name: readStringReference(buffer, source, input.byteOffset)
+                            || ""
+                    });
+                }
+                const branches = [];
+                if (version2) {
+                    const branchCount = readCount(buffer.readShort(), "branches", buffer, source, input.byteOffset);
+                    for (let i = 0; i < branchCount; i++) {
+                        branches.push(readStringReference(buffer, source, input.byteOffset)
+                            || "");
+                    }
+                }
+                const branchIncluded = branches.length > 0;
+                requireBlock(buffer, indexTablePos, 1, "package items", source);
+                const itemCount = readCount(buffer.readShort(), "package items", buffer, source, input.byteOffset);
+                const items = [];
+                for (let i = 0; i < itemCount; i++) {
+                    const recordLength = buffer.readInt();
+                    const recordStart = buffer.pos;
+                    const nextPosition = checkedRecordEnd(buffer, recordStart, recordLength, "package item", source, input.byteOffset);
+                    const type = buffer.readByte();
+                    const itemId = readStringReference(buffer, source, input.byteOffset) || "";
+                    let itemName = readStringReference(buffer, source, input.byteOffset);
+                    const itemPath = readStringReference(buffer, source, input.byteOffset);
+                    const itemFile = readStringReference(buffer, source, input.byteOffset);
+                    const exported = buffer.readBool();
+                    const width = buffer.readInt();
+                    const height = buffer.readInt();
+                    let objectType;
+                    let scale9Grid;
+                    let scaleByTile;
+                    let tileGridIndice;
+                    let smoothing;
+                    let rawData;
+                    let skeletonAnchor;
+                    switch (type) {
+                        case exports.PackageItemType.Image:
+                            objectType = exports.ObjectType.Image;
+                            const scaleOption = buffer.readByte();
+                            if (scaleOption === 1) {
+                                scale9Grid = {
+                                    x: buffer.readInt(),
+                                    y: buffer.readInt(),
+                                    width: buffer.readInt(),
+                                    height: buffer.readInt()
+                                };
+                                tileGridIndice = buffer.readInt();
+                            }
+                            else if (scaleOption === 2)
+                                scaleByTile = true;
+                            smoothing = buffer.readBool();
+                            break;
+                        case exports.PackageItemType.MovieClip:
+                            smoothing = buffer.readBool();
+                            objectType = exports.ObjectType.MovieClip;
+                            rawData = readBufferBytes(buffer);
+                            break;
+                        case exports.PackageItemType.Font:
+                            rawData = readBufferBytes(buffer);
+                            break;
+                        case exports.PackageItemType.Component:
+                            const extension = buffer.readByte();
+                            objectType = extension > 0
+                                ? extension
+                                : exports.ObjectType.Component;
+                            rawData = readBufferBytes(buffer);
+                            break;
+                        case exports.PackageItemType.Spine:
+                        case exports.PackageItemType.DragonBones:
+                            skeletonAnchor = {
+                                x: buffer.readFloat(),
+                                y: buffer.readFloat()
+                            };
+                            break;
+                    }
+                    let branch = null;
+                    let itemBranches = [];
+                    let highResolution = [];
+                    if (version2) {
+                        branch = readStringReference(buffer, source, input.byteOffset);
+                        if (branch !== null)
+                            itemName = branch + "/" + (itemName || "");
+                        const itemBranchCount = readCount(buffer.readByte(), "item branches", buffer, source, input.byteOffset);
+                        if (itemBranchCount > 0) {
+                            if (branchIncluded) {
+                                for (let j = 0; j < itemBranchCount; j++) {
+                                    itemBranches.push(readStringReference(buffer, source, input.byteOffset) || "");
+                                }
+                            }
+                            else {
+                                itemBranches = [
+                                    readStringReference(buffer, source, input.byteOffset) || ""
+                                ];
+                            }
+                        }
+                        const highResolutionCount = readCount(buffer.readByte(), "high-resolution items", buffer, source, input.byteOffset);
+                        for (let j = 0; j < highResolutionCount; j++) {
+                            highResolution.push(readStringReference(buffer, source, input.byteOffset) || "");
+                        }
+                    }
+                    if (buffer.pos > nextPosition) {
+                        throw decodeError("INVALID_BLOCK", "Package item record is shorter than its declared fields.", source, packageOffset(buffer, input.byteOffset));
+                    }
+                    items.push({
+                        type,
+                        id: itemId,
+                        name: itemName,
+                        path: itemPath,
+                        file: itemFile,
+                        exported,
+                        width,
+                        height,
+                        objectType,
+                        scale9Grid,
+                        scaleByTile,
+                        tileGridIndice,
+                        smoothing,
+                        rawData,
+                        skeletonAnchor,
+                        branch,
+                        branches: itemBranches,
+                        highResolution
+                    });
+                    buffer.pos = nextPosition;
+                }
+                requireBlock(buffer, indexTablePos, 2, "sprites", source);
+                const spriteCount = readCount(buffer.readShort(), "sprites", buffer, source, input.byteOffset);
+                const sprites = [];
+                for (let i = 0; i < spriteCount; i++) {
+                    const recordLength = buffer.readUshort();
+                    const recordStart = buffer.pos;
+                    const nextPosition = checkedRecordEnd(buffer, recordStart, recordLength, "sprite", source, input.byteOffset);
+                    const itemId = readStringReference(buffer, source, input.byteOffset) || "";
+                    const atlasId = readStringReference(buffer, source, input.byteOffset) || "";
+                    const x = buffer.readInt();
+                    const y = buffer.readInt();
+                    const width = buffer.readInt();
+                    const height = buffer.readInt();
+                    const rotated = buffer.readBool();
+                    let offset = { x: 0, y: 0 };
+                    let originalSize = rotated
+                        ? { width: height, height: width }
+                        : { width, height };
+                    if (version2 && buffer.readBool()) {
+                        offset = {
+                            x: buffer.readInt(),
+                            y: buffer.readInt()
+                        };
+                        originalSize = {
+                            width: buffer.readInt(),
+                            height: buffer.readInt()
+                        };
+                    }
+                    if (buffer.pos > nextPosition) {
+                        throw decodeError("INVALID_BLOCK", "Sprite record is shorter than its declared fields.", source, packageOffset(buffer, input.byteOffset));
+                    }
+                    sprites.push({
+                        itemId,
+                        atlasId,
+                        x,
+                        y,
+                        width,
+                        height,
+                        rotated,
+                        offset,
+                        originalSize
+                    });
+                    buffer.pos = nextPosition;
+                }
+                const pixelHitTests = [];
+                if (buffer.seek(indexTablePos, 3)) {
+                    const hitTestCount = readCount(buffer.readShort(), "pixel hit tests", buffer, source, input.byteOffset);
+                    for (let i = 0; i < hitTestCount; i++) {
+                        const recordLength = buffer.readInt();
+                        const recordStart = buffer.pos;
+                        const nextPosition = checkedRecordEnd(buffer, recordStart, recordLength, "pixel hit test", source, input.byteOffset);
+                        const itemId = readStringReference(buffer, source, input.byteOffset) || "";
+                        buffer.readInt(); // Deprecated offset field.
+                        const pixelWidth = buffer.readInt();
+                        const scaleDenominator = buffer.readByte();
+                        const byteLength = buffer.readInt();
+                        const pixels = readBytes(buffer, byteLength, source, input.byteOffset);
+                        if (buffer.pos > nextPosition) {
+                            throw decodeError("INVALID_BLOCK", "Pixel hit-test record is shorter than its declared fields.", source, packageOffset(buffer, input.byteOffset));
+                        }
+                        pixelHitTests.push({
+                            itemId,
+                            pixelWidth,
+                            scaleDenominator,
+                            pixels
+                        });
+                        buffer.pos = nextPosition;
+                    }
+                }
+                return {
+                    version: buffer.version,
+                    compressed,
+                    id,
+                    name,
+                    dependencies,
+                    branches,
+                    items,
+                    sprites,
+                    pixelHitTests,
+                    stringTable
+                };
+            }
+            catch (error) {
+                if (error instanceof PackageDecodeError)
+                    throw error;
+                const offset = Math.max(0, Math.min(buffer.pos, input.byteLength));
+                const detail = error instanceof Error
+                    ? error.message
+                    : String(error);
+                throw decodeError("TRUNCATED_DATA", "The package ended while reading binary data"
+                    + (detail ? ": " + detail : "."), source, offset, error);
+            }
+        }
+    }
+    function normalizeInput(data, source) {
+        if (data instanceof ArrayBuffer) {
+            return {
+                buffer: data,
+                byteOffset: 0,
+                byteLength: data.byteLength
+            };
+        }
+        if (data != null && ArrayBuffer.isView(data)) {
+            return {
+                buffer: data.buffer,
+                byteOffset: data.byteOffset,
+                byteLength: data.byteLength
+            };
+        }
+        throw decodeError("INVALID_INPUT", "Expected an ArrayBuffer or ArrayBuffer view.", source, 0);
+    }
+    function decodeError(code, detail, source, offset, cause) {
+        return new PackageDecodeError(code, "Cannot decode FairyGUI package \""
+            + source
+            + "\" at byte "
+            + offset
+            + ": "
+            + detail, source, offset, cause);
+    }
+    function packageOffset(buffer, rootByteOffset) {
+        return buffer.byteOffset - rootByteOffset + buffer.pos;
+    }
+    function requireBlock(buffer, indexTablePos, blockIndex, blockName, source) {
+        if (!buffer.seek(indexTablePos, blockIndex)) {
+            throw decodeError("MISSING_BLOCK", "Required " + blockName + " block " + blockIndex + " is missing.", source, indexTablePos);
+        }
+    }
+    function readCount(count, collectionName, buffer, source, rootByteOffset) {
+        if (!Number.isSafeInteger(count) || count < 0 || count > MAX_COLLECTION_SIZE) {
+            throw decodeError("INVALID_BLOCK", "Invalid " + collectionName + " count: " + count + ".", source, packageOffset(buffer, rootByteOffset));
+        }
+        return count;
+    }
+    function readStringReference(buffer, source, rootByteOffset) {
+        const offset = packageOffset(buffer, rootByteOffset);
+        const index = buffer.readUshort();
+        if (index === NULL_STRING_INDEX)
+            return null;
+        if (index === EMPTY_STRING_INDEX)
+            return "";
+        if (index >= buffer.stringTable.length) {
+            throw decodeError("INVALID_STRING_REFERENCE", "String index "
+                + index
+                + " is outside the "
+                + buffer.stringTable.length
+                + "-entry string table.", source, offset);
+        }
+        return buffer.stringTable[index];
+    }
+    function checkedRecordEnd(buffer, recordStart, recordLength, recordName, source, rootByteOffset) {
+        const recordEnd = recordStart + recordLength;
+        if (!Number.isSafeInteger(recordLength)
+            || recordLength < 0
+            || recordEnd < recordStart
+            || recordEnd > buffer.length) {
+            throw decodeError("INVALID_BLOCK", "Invalid " + recordName + " record length: " + recordLength + ".", source, packageOffset(buffer, rootByteOffset) - 4);
+        }
+        return recordEnd;
+    }
+    function skipChecked(buffer, count, source, rootByteOffset) {
+        if (count < 0 || count > buffer.length - buffer.pos) {
+            throw decodeError("TRUNCATED_DATA", "Cannot skip " + count + " bytes past the package boundary.", source, packageOffset(buffer, rootByteOffset));
+        }
+        buffer.skip(count);
+    }
+    function readBufferBytes(buffer) {
+        const rawBuffer = buffer.readBuffer();
+        return new Uint8Array(rawBuffer.data, rawBuffer.byteOffset, rawBuffer.length).slice();
+    }
+    function readBytes(buffer, count, source, rootByteOffset) {
+        if (!Number.isSafeInteger(count)
+            || count < 0
+            || count > buffer.length - buffer.pos) {
+            throw decodeError("TRUNCATED_DATA", "Cannot read byte array of length " + count + ".", source, packageOffset(buffer, rootByteOffset));
+        }
+        const bytes = new Uint8Array(buffer.data, buffer.byteOffset + buffer.pos, count).slice();
+        buffer.skip(count);
+        return bytes;
+    }
+
+    class UIPackageLoadError extends Error {
+        constructor(code, message, source, packageId, packageName) {
+            super(message);
+            this.name = "UIPackageLoadError";
+            this.code = code;
+            this.source = source;
+            this.packageId = packageId;
+            this.packageName = packageName;
+            Object.setPrototypeOf(this, UIPackageLoadError.prototype);
+        }
+    }
     class UIPackage {
         constructor() {
             this._items = [];
@@ -4740,7 +5128,7 @@
         static loadPackage(url) {
             if (!url.endsWith("/"))
                 url += "/";
-            return new Promise(resolve => {
+            return new Promise((resolve, reject) => {
                 let pkg = _instById[url];
                 if (pkg) {
                     resolve(pkg);
@@ -4749,14 +5137,77 @@
                 let request = new HttpRequest();
                 request.send(url + "package.xml", null, "get", "arraybuffer");
                 request.on("complete", (evt) => {
-                    let pkg = new UIPackage();
-                    pkg.loadPackage(new ByteBuffer(evt.data), url);
-                    _instById[pkg.id] = pkg;
-                    _instByName[pkg.name] = pkg;
-                    _instById[pkg.path] = pkg;
-                    resolve(pkg);
+                    try {
+                        resolve(UIPackage.loadPackageFromBuffer(evt.data, {
+                            source: url + "package.xml",
+                            resourceBaseURL: url
+                        }));
+                    }
+                    catch (error) {
+                        reject(error);
+                    }
+                });
+                request.on("error", (evt) => {
+                    reject(new Error("Cannot load FairyGUI package \""
+                        + url
+                        + "\": "
+                        + String(evt.data)));
                 });
             });
+        }
+        static loadPackageFromBuffer(data, options = {}) {
+            const source = options.source || "<memory>";
+            const resourceBaseURL = normalizeResourceBaseURL(options.resourceBaseURL);
+            const decoded = PackageDecoder.decode(data, { source });
+            const existingById = _instById[decoded.id];
+            if (existingById) {
+                if (existingById.name !== decoded.name) {
+                    throw packageLoadError("PACKAGE_ID_CONFLICT", source, decoded, "Package ID \""
+                        + decoded.id
+                        + "\" is already registered by package \""
+                        + existingById.name
+                        + "\", so it cannot be reused by package \""
+                        + decoded.name
+                        + "\".");
+                }
+                if (existingById.path !== resourceBaseURL) {
+                    throw packageLoadError("PACKAGE_PATH_CONFLICT", source, decoded, "Package \""
+                        + decoded.name
+                        + "\" is already registered with resource base URL \""
+                        + existingById.path
+                        + "\", not \""
+                        + resourceBaseURL
+                        + "\".");
+                }
+                return existingById;
+            }
+            const existingByName = _instByName[decoded.name];
+            if (existingByName) {
+                throw packageLoadError("PACKAGE_NAME_CONFLICT", source, decoded, "Package name \""
+                    + decoded.name
+                    + "\" is already registered with ID \""
+                    + existingByName.id
+                    + "\", not \""
+                    + decoded.id
+                    + "\".");
+            }
+            if (resourceBaseURL) {
+                const existingByPath = _instById[resourceBaseURL];
+                if (existingByPath) {
+                    throw packageLoadError("PACKAGE_PATH_CONFLICT", source, decoded, "Resource base URL \""
+                        + resourceBaseURL
+                        + "\" is already registered by package \""
+                        + existingByPath.name
+                        + "\".");
+                }
+            }
+            const pkg = new UIPackage();
+            pkg.loadDecodedPackage(decoded, resourceBaseURL);
+            _instById[pkg.id] = pkg;
+            _instByName[pkg.name] = pkg;
+            if (pkg.path)
+                _instById[pkg.path] = pkg;
+            return pkg;
         }
         static removePackage(packageIdOrName) {
             var pkg = _instById[packageIdOrName];
@@ -4831,138 +5282,64 @@
             var srcName = url.substr(pos2 + 1);
             return UIPackage.getItemURL(pkgName, srcName);
         }
-        loadPackage(buffer, path) {
-            if (buffer.readUint() != 0x46475549)
-                throw "FairyGUI: old package format found in '" + path + "'";
-            this._path = path;
-            buffer.version = buffer.readInt();
-            var ver2 = buffer.version >= 2;
-            buffer.readBool(); //compressed
-            this._id = buffer.readString();
-            this._name = buffer.readString();
-            buffer.skip(20);
-            var indexTablePos = buffer.pos;
-            var cnt;
-            var i;
-            var nextPos;
-            var str;
-            var branchIncluded;
-            buffer.seek(indexTablePos, 4);
-            cnt = buffer.readInt();
-            var stringTable = new Array(cnt);
-            buffer.stringTable = stringTable;
-            for (i = 0; i < cnt; i++)
-                stringTable[i] = buffer.readString();
-            if (buffer.seek(indexTablePos, 5)) {
-                cnt = buffer.readInt();
-                for (i = 0; i < cnt; i++) {
-                    let index = buffer.readUshort();
-                    let len = buffer.readInt();
-                    stringTable[index] = buffer.readString(len);
-                }
-            }
-            buffer.seek(indexTablePos, 0);
-            cnt = buffer.readShort();
-            for (i = 0; i < cnt; i++)
-                this._dependencies.push({ id: buffer.readS(), name: buffer.readS() });
-            if (ver2) {
-                cnt = buffer.readShort();
-                if (cnt > 0) {
-                    this._branches = buffer.readSArray(cnt);
-                    if (_branch)
-                        this._branchIndex = this._branches.indexOf(_branch);
-                }
-                branchIncluded = cnt > 0;
-            }
-            buffer.seek(indexTablePos, 1);
-            var pi;
-            cnt = buffer.readShort();
-            for (i = 0; i < cnt; i++) {
-                nextPos = buffer.readInt();
-                nextPos += buffer.pos;
-                pi = new PackageItem();
+        loadDecodedPackage(decoded, resourceBaseURL) {
+            this._path = resourceBaseURL;
+            this._id = decoded.id;
+            this._name = decoded.name;
+            this._dependencies = decoded.dependencies.map(dependency => ({
+                id: dependency.id,
+                name: dependency.name
+            }));
+            this._branches = decoded.branches.slice();
+            if (_branch)
+                this._branchIndex = this._branches.indexOf(_branch);
+            const branchIncluded = this._branches.length > 0;
+            const stringTable = decoded.stringTable.slice();
+            for (const decodedItem of decoded.items) {
+                const pi = new PackageItem();
                 pi.owner = this;
-                pi.type = buffer.readByte();
-                pi.id = buffer.readS();
-                pi.name = buffer.readS();
-                buffer.readS(); //path
-                pi.file = path + buffer.readS();
-                buffer.readBool(); //exported
-                pi.width = buffer.readInt();
-                pi.height = buffer.readInt();
-                switch (pi.type) {
-                    case exports.PackageItemType.Image:
-                        {
-                            pi.objectType = exports.ObjectType.Image;
-                            var scaleOption = buffer.readByte();
-                            if (scaleOption == 1) {
-                                let sx = buffer.readInt();
-                                let sy = buffer.readInt();
-                                let sw = buffer.readInt();
-                                let sh = buffer.readInt();
-                                pi.scale9Grid = new Margin();
-                                pi.scale9Grid.left = sx;
-                                pi.scale9Grid.top = sy;
-                                pi.scale9Grid.right = pi.width - sx - sw;
-                                pi.scale9Grid.bottom = pi.height - sy - sh;
-                                pi.tileGridIndice = buffer.readInt();
-                            }
-                            else if (scaleOption == 2)
-                                pi.scaleByTile = true;
-                            pi.smoothing = buffer.readBool();
-                            break;
-                        }
-                    case exports.PackageItemType.MovieClip:
-                        {
-                            pi.smoothing = buffer.readBool();
-                            pi.objectType = exports.ObjectType.MovieClip;
-                            pi.rawData = buffer.readBuffer();
-                            break;
-                        }
-                    case exports.PackageItemType.Font:
-                        {
-                            pi.rawData = buffer.readBuffer();
-                            break;
-                        }
-                    case exports.PackageItemType.Component:
-                        {
-                            var extension = buffer.readByte();
-                            if (extension > 0)
-                                pi.objectType = extension;
-                            else
-                                pi.objectType = exports.ObjectType.Component;
-                            pi.rawData = buffer.readBuffer();
-                            UIObjectFactory.resolveExtension(pi);
-                            break;
-                        }
-                    case exports.PackageItemType.Spine:
-                    case exports.PackageItemType.DragonBones:
-                        {
-                            buffer.readFloat();
-                            buffer.readFloat();
-                            break;
-                        }
+                pi.type = decodedItem.type;
+                pi.id = decodedItem.id;
+                pi.name = decodedItem.name;
+                pi.file = decodedItem.file == null
+                    ? null
+                    : resourceBaseURL + decodedItem.file;
+                pi.width = decodedItem.width;
+                pi.height = decodedItem.height;
+                pi.objectType = decodedItem.objectType;
+                pi.scaleByTile = decodedItem.scaleByTile;
+                pi.tileGridIndice = decodedItem.tileGridIndice;
+                pi.smoothing = decodedItem.smoothing;
+                if (decodedItem.scale9Grid) {
+                    pi.scale9Grid = new Margin();
+                    pi.scale9Grid.left = decodedItem.scale9Grid.x;
+                    pi.scale9Grid.top = decodedItem.scale9Grid.y;
+                    pi.scale9Grid.right = pi.width
+                        - decodedItem.scale9Grid.x
+                        - decodedItem.scale9Grid.width;
+                    pi.scale9Grid.bottom = pi.height
+                        - decodedItem.scale9Grid.y
+                        - decodedItem.scale9Grid.height;
                 }
-                if (ver2) {
-                    str = buffer.readS(); //branch
-                    if (str)
-                        pi.name = str + "/" + pi.name;
-                    var branchCnt = buffer.readByte();
-                    if (branchCnt > 0) {
-                        if (branchIncluded)
-                            pi.branches = buffer.readSArray(branchCnt);
-                        else
-                            this._itemsById[buffer.readS()] = pi;
-                    }
-                    var highResCnt = buffer.readByte();
-                    if (highResCnt > 0)
-                        pi.highResolution = buffer.readSArray(highResCnt);
+                if (decodedItem.rawData) {
+                    pi.rawData = new ByteBuffer(decodedItem.rawData.buffer, decodedItem.rawData.byteOffset, decodedItem.rawData.byteLength);
+                    pi.rawData.version = decoded.version;
+                    pi.rawData.stringTable = stringTable;
                 }
+                if (decodedItem.branches.length > 0) {
+                    if (branchIncluded)
+                        pi.branches = decodedItem.branches.slice();
+                    else
+                        this._itemsById[decodedItem.branches[0]] = pi;
+                }
+                if (decodedItem.highResolution.length > 0)
+                    pi.highResolution = decodedItem.highResolution.slice();
+                if (pi.type === exports.PackageItemType.Component)
+                    UIObjectFactory.resolveExtension(pi);
                 this._items.push(pi);
                 this._itemsById[pi.id] = pi;
                 if (pi.name != null)
                     this._itemsByName[pi.name] = pi;
-                buffer.pos = nextPos;
             }
         }
         dispose() {
@@ -5009,6 +5386,17 @@
     var _instByName = {};
     var _branch = "";
     var _vars = {};
+    function normalizeResourceBaseURL(value) {
+        if (!value)
+            return "";
+        return value.endsWith("/") ? value : value + "/";
+    }
+    function packageLoadError(code, source, decoded, detail) {
+        return new UIPackageLoadError(code, "Cannot load FairyGUI package from \""
+            + source
+            + "\": "
+            + detail, source, decoded.id, decoded.name);
+    }
 
     class ControllerAction {
         constructor() {
@@ -15402,383 +15790,6 @@
         }
     }
 
-    const FGUI_MAGIC = 0x46475549;
-    const NULL_STRING_INDEX = 65534;
-    const EMPTY_STRING_INDEX = 65533;
-    const MAX_COLLECTION_SIZE = 1000000;
-    class PackageDecodeError extends Error {
-        constructor(code, message, source, offset, cause) {
-            super(message);
-            this.name = "PackageDecodeError";
-            this.code = code;
-            this.source = source;
-            this.offset = offset;
-            this.cause = cause;
-            Object.setPrototypeOf(this, PackageDecodeError.prototype);
-        }
-    }
-    /**
-     * Pure FairyGUI package decoder.
-     *
-     * It does not perform network access, mutate the UIPackage registry, or create
-     * any DOM objects. Runtime assembly is intentionally handled by UIPackage.
-     */
-    class PackageDecoder {
-        static decode(data, options = {}) {
-            const source = options.source || "<memory>";
-            const input = normalizeInput(data, source);
-            const buffer = new ByteBuffer(input.buffer, input.byteOffset, input.byteLength);
-            try {
-                if (buffer.readUint() !== FGUI_MAGIC) {
-                    throw decodeError("INVALID_MAGIC", "Expected FairyGUI magic 0x46475549.", source, 0);
-                }
-                buffer.version = buffer.readInt();
-                const compressed = buffer.readBool();
-                if (compressed) {
-                    throw decodeError("UNSUPPORTED_COMPRESSION", "Compressed FairyGUI packages are not supported yet.", source, buffer.pos - 1);
-                }
-                const id = buffer.readString();
-                const name = buffer.readString();
-                skipChecked(buffer, 20, source, input.byteOffset);
-                const indexTablePos = buffer.pos;
-                const version2 = buffer.version >= 2;
-                requireBlock(buffer, indexTablePos, 4, "string table", source);
-                const stringCount = readCount(buffer.readInt(), "string table", buffer, source, input.byteOffset);
-                const stringTable = [];
-                for (let i = 0; i < stringCount; i++)
-                    stringTable.push(buffer.readString());
-                buffer.stringTable = stringTable;
-                if (buffer.seek(indexTablePos, 5)) {
-                    const overrideCount = readCount(buffer.readInt(), "custom string table", buffer, source, input.byteOffset);
-                    for (let i = 0; i < overrideCount; i++) {
-                        const stringIndexOffset = packageOffset(buffer, input.byteOffset);
-                        const stringIndex = buffer.readUshort();
-                        if (stringIndex >= stringTable.length) {
-                            throw decodeError("INVALID_STRING_REFERENCE", "Custom string override references index "
-                                + stringIndex
-                                + ", but the string table contains "
-                                + stringTable.length
-                                + " entries.", source, stringIndexOffset);
-                        }
-                        const length = buffer.readInt();
-                        if (length < 0) {
-                            throw decodeError("INVALID_BLOCK", "Custom string length cannot be negative.", source, packageOffset(buffer, input.byteOffset) - 4);
-                        }
-                        stringTable[stringIndex] = buffer.readString(length);
-                    }
-                }
-                requireBlock(buffer, indexTablePos, 0, "dependencies", source);
-                const dependencies = [];
-                const dependencyCount = readCount(buffer.readShort(), "dependencies", buffer, source, input.byteOffset);
-                for (let i = 0; i < dependencyCount; i++) {
-                    dependencies.push({
-                        id: readStringReference(buffer, source, input.byteOffset)
-                            || "",
-                        name: readStringReference(buffer, source, input.byteOffset)
-                            || ""
-                    });
-                }
-                const branches = [];
-                if (version2) {
-                    const branchCount = readCount(buffer.readShort(), "branches", buffer, source, input.byteOffset);
-                    for (let i = 0; i < branchCount; i++) {
-                        branches.push(readStringReference(buffer, source, input.byteOffset)
-                            || "");
-                    }
-                }
-                const branchIncluded = branches.length > 0;
-                requireBlock(buffer, indexTablePos, 1, "package items", source);
-                const itemCount = readCount(buffer.readShort(), "package items", buffer, source, input.byteOffset);
-                const items = [];
-                for (let i = 0; i < itemCount; i++) {
-                    const recordLength = buffer.readInt();
-                    const recordStart = buffer.pos;
-                    const nextPosition = checkedRecordEnd(buffer, recordStart, recordLength, "package item", source, input.byteOffset);
-                    const type = buffer.readByte();
-                    const itemId = readStringReference(buffer, source, input.byteOffset) || "";
-                    let itemName = readStringReference(buffer, source, input.byteOffset);
-                    const itemPath = readStringReference(buffer, source, input.byteOffset);
-                    const itemFile = readStringReference(buffer, source, input.byteOffset);
-                    const exported = buffer.readBool();
-                    const width = buffer.readInt();
-                    const height = buffer.readInt();
-                    let objectType;
-                    let scale9Grid;
-                    let scaleByTile;
-                    let tileGridIndice;
-                    let smoothing;
-                    let rawData;
-                    let skeletonAnchor;
-                    switch (type) {
-                        case exports.PackageItemType.Image:
-                            objectType = exports.ObjectType.Image;
-                            const scaleOption = buffer.readByte();
-                            if (scaleOption === 1) {
-                                scale9Grid = {
-                                    x: buffer.readInt(),
-                                    y: buffer.readInt(),
-                                    width: buffer.readInt(),
-                                    height: buffer.readInt()
-                                };
-                                tileGridIndice = buffer.readInt();
-                            }
-                            else if (scaleOption === 2)
-                                scaleByTile = true;
-                            smoothing = buffer.readBool();
-                            break;
-                        case exports.PackageItemType.MovieClip:
-                            smoothing = buffer.readBool();
-                            objectType = exports.ObjectType.MovieClip;
-                            rawData = readBufferBytes(buffer);
-                            break;
-                        case exports.PackageItemType.Font:
-                            rawData = readBufferBytes(buffer);
-                            break;
-                        case exports.PackageItemType.Component:
-                            const extension = buffer.readByte();
-                            objectType = extension > 0
-                                ? extension
-                                : exports.ObjectType.Component;
-                            rawData = readBufferBytes(buffer);
-                            break;
-                        case exports.PackageItemType.Spine:
-                        case exports.PackageItemType.DragonBones:
-                            skeletonAnchor = {
-                                x: buffer.readFloat(),
-                                y: buffer.readFloat()
-                            };
-                            break;
-                    }
-                    let branch = null;
-                    let itemBranches = [];
-                    let highResolution = [];
-                    if (version2) {
-                        branch = readStringReference(buffer, source, input.byteOffset);
-                        if (branch !== null)
-                            itemName = branch + "/" + (itemName || "");
-                        const itemBranchCount = readCount(buffer.readByte(), "item branches", buffer, source, input.byteOffset);
-                        if (itemBranchCount > 0) {
-                            if (branchIncluded) {
-                                for (let j = 0; j < itemBranchCount; j++) {
-                                    itemBranches.push(readStringReference(buffer, source, input.byteOffset) || "");
-                                }
-                            }
-                            else {
-                                itemBranches = [
-                                    readStringReference(buffer, source, input.byteOffset) || ""
-                                ];
-                            }
-                        }
-                        const highResolutionCount = readCount(buffer.readByte(), "high-resolution items", buffer, source, input.byteOffset);
-                        for (let j = 0; j < highResolutionCount; j++) {
-                            highResolution.push(readStringReference(buffer, source, input.byteOffset) || "");
-                        }
-                    }
-                    if (buffer.pos > nextPosition) {
-                        throw decodeError("INVALID_BLOCK", "Package item record is shorter than its declared fields.", source, packageOffset(buffer, input.byteOffset));
-                    }
-                    items.push({
-                        type,
-                        id: itemId,
-                        name: itemName,
-                        path: itemPath,
-                        file: itemFile,
-                        exported,
-                        width,
-                        height,
-                        objectType,
-                        scale9Grid,
-                        scaleByTile,
-                        tileGridIndice,
-                        smoothing,
-                        rawData,
-                        skeletonAnchor,
-                        branch,
-                        branches: itemBranches,
-                        highResolution
-                    });
-                    buffer.pos = nextPosition;
-                }
-                requireBlock(buffer, indexTablePos, 2, "sprites", source);
-                const spriteCount = readCount(buffer.readShort(), "sprites", buffer, source, input.byteOffset);
-                const sprites = [];
-                for (let i = 0; i < spriteCount; i++) {
-                    const recordLength = buffer.readUshort();
-                    const recordStart = buffer.pos;
-                    const nextPosition = checkedRecordEnd(buffer, recordStart, recordLength, "sprite", source, input.byteOffset);
-                    const itemId = readStringReference(buffer, source, input.byteOffset) || "";
-                    const atlasId = readStringReference(buffer, source, input.byteOffset) || "";
-                    const x = buffer.readInt();
-                    const y = buffer.readInt();
-                    const width = buffer.readInt();
-                    const height = buffer.readInt();
-                    const rotated = buffer.readBool();
-                    let offset = { x: 0, y: 0 };
-                    let originalSize = rotated
-                        ? { width: height, height: width }
-                        : { width, height };
-                    if (version2 && buffer.readBool()) {
-                        offset = {
-                            x: buffer.readInt(),
-                            y: buffer.readInt()
-                        };
-                        originalSize = {
-                            width: buffer.readInt(),
-                            height: buffer.readInt()
-                        };
-                    }
-                    if (buffer.pos > nextPosition) {
-                        throw decodeError("INVALID_BLOCK", "Sprite record is shorter than its declared fields.", source, packageOffset(buffer, input.byteOffset));
-                    }
-                    sprites.push({
-                        itemId,
-                        atlasId,
-                        x,
-                        y,
-                        width,
-                        height,
-                        rotated,
-                        offset,
-                        originalSize
-                    });
-                    buffer.pos = nextPosition;
-                }
-                const pixelHitTests = [];
-                if (buffer.seek(indexTablePos, 3)) {
-                    const hitTestCount = readCount(buffer.readShort(), "pixel hit tests", buffer, source, input.byteOffset);
-                    for (let i = 0; i < hitTestCount; i++) {
-                        const recordLength = buffer.readInt();
-                        const recordStart = buffer.pos;
-                        const nextPosition = checkedRecordEnd(buffer, recordStart, recordLength, "pixel hit test", source, input.byteOffset);
-                        const itemId = readStringReference(buffer, source, input.byteOffset) || "";
-                        buffer.readInt(); // Deprecated offset field.
-                        const pixelWidth = buffer.readInt();
-                        const scaleDenominator = buffer.readByte();
-                        const byteLength = buffer.readInt();
-                        const pixels = readBytes(buffer, byteLength, source, input.byteOffset);
-                        if (buffer.pos > nextPosition) {
-                            throw decodeError("INVALID_BLOCK", "Pixel hit-test record is shorter than its declared fields.", source, packageOffset(buffer, input.byteOffset));
-                        }
-                        pixelHitTests.push({
-                            itemId,
-                            pixelWidth,
-                            scaleDenominator,
-                            pixels
-                        });
-                        buffer.pos = nextPosition;
-                    }
-                }
-                return {
-                    version: buffer.version,
-                    compressed,
-                    id,
-                    name,
-                    dependencies,
-                    branches,
-                    items,
-                    sprites,
-                    pixelHitTests,
-                    stringTable
-                };
-            }
-            catch (error) {
-                if (error instanceof PackageDecodeError)
-                    throw error;
-                const offset = Math.max(0, Math.min(buffer.pos, input.byteLength));
-                const detail = error instanceof Error
-                    ? error.message
-                    : String(error);
-                throw decodeError("TRUNCATED_DATA", "The package ended while reading binary data"
-                    + (detail ? ": " + detail : "."), source, offset, error);
-            }
-        }
-    }
-    function normalizeInput(data, source) {
-        if (data instanceof ArrayBuffer) {
-            return {
-                buffer: data,
-                byteOffset: 0,
-                byteLength: data.byteLength
-            };
-        }
-        if (data != null && ArrayBuffer.isView(data)) {
-            return {
-                buffer: data.buffer,
-                byteOffset: data.byteOffset,
-                byteLength: data.byteLength
-            };
-        }
-        throw decodeError("INVALID_INPUT", "Expected an ArrayBuffer or ArrayBuffer view.", source, 0);
-    }
-    function decodeError(code, detail, source, offset, cause) {
-        return new PackageDecodeError(code, "Cannot decode FairyGUI package \""
-            + source
-            + "\" at byte "
-            + offset
-            + ": "
-            + detail, source, offset, cause);
-    }
-    function packageOffset(buffer, rootByteOffset) {
-        return buffer.byteOffset - rootByteOffset + buffer.pos;
-    }
-    function requireBlock(buffer, indexTablePos, blockIndex, blockName, source) {
-        if (!buffer.seek(indexTablePos, blockIndex)) {
-            throw decodeError("MISSING_BLOCK", "Required " + blockName + " block " + blockIndex + " is missing.", source, indexTablePos);
-        }
-    }
-    function readCount(count, collectionName, buffer, source, rootByteOffset) {
-        if (!Number.isSafeInteger(count) || count < 0 || count > MAX_COLLECTION_SIZE) {
-            throw decodeError("INVALID_BLOCK", "Invalid " + collectionName + " count: " + count + ".", source, packageOffset(buffer, rootByteOffset));
-        }
-        return count;
-    }
-    function readStringReference(buffer, source, rootByteOffset) {
-        const offset = packageOffset(buffer, rootByteOffset);
-        const index = buffer.readUshort();
-        if (index === NULL_STRING_INDEX)
-            return null;
-        if (index === EMPTY_STRING_INDEX)
-            return "";
-        if (index >= buffer.stringTable.length) {
-            throw decodeError("INVALID_STRING_REFERENCE", "String index "
-                + index
-                + " is outside the "
-                + buffer.stringTable.length
-                + "-entry string table.", source, offset);
-        }
-        return buffer.stringTable[index];
-    }
-    function checkedRecordEnd(buffer, recordStart, recordLength, recordName, source, rootByteOffset) {
-        const recordEnd = recordStart + recordLength;
-        if (!Number.isSafeInteger(recordLength)
-            || recordLength < 0
-            || recordEnd < recordStart
-            || recordEnd > buffer.length) {
-            throw decodeError("INVALID_BLOCK", "Invalid " + recordName + " record length: " + recordLength + ".", source, packageOffset(buffer, rootByteOffset) - 4);
-        }
-        return recordEnd;
-    }
-    function skipChecked(buffer, count, source, rootByteOffset) {
-        if (count < 0 || count > buffer.length - buffer.pos) {
-            throw decodeError("TRUNCATED_DATA", "Cannot skip " + count + " bytes past the package boundary.", source, packageOffset(buffer, rootByteOffset));
-        }
-        buffer.skip(count);
-    }
-    function readBufferBytes(buffer) {
-        const rawBuffer = buffer.readBuffer();
-        return new Uint8Array(rawBuffer.data, rawBuffer.byteOffset, rawBuffer.length).slice();
-    }
-    function readBytes(buffer, count, source, rootByteOffset) {
-        if (!Number.isSafeInteger(count)
-            || count < 0
-            || count > buffer.length - buffer.pos) {
-            throw decodeError("TRUNCATED_DATA", "Cannot read byte array of length " + count + ".", source, packageOffset(buffer, rootByteOffset));
-        }
-        const bytes = new Uint8Array(buffer.data, buffer.byteOffset + buffer.pos, count).slice();
-        buffer.skip(count);
-        return bytes;
-    }
-
     class UIObjectFactory$1 {
         static setExtension(url, type) {
             if (url == null)
@@ -18642,6 +18653,7 @@
     exports.UIElement = UIElement;
     exports.UIObjectFactory = UIObjectFactory$1;
     exports.UIPackage = UIPackage;
+    exports.UIPackageLoadError = UIPackageLoadError;
     exports.Vec2 = Vec2;
     exports.XML = XML;
     exports.XMLIterator = XMLIterator;
