@@ -18,8 +18,11 @@
   ],
   "scripts": {
     "build": "gulp build",
-    "test": "webpack --config test/webpack.config.js"
+    "test": "pnpm run test:unit",
+    "test:unit": "tsc -p tsconfig.unit.json && node --test \"test/unit/**/*.test.cjs\"",
+    "test:demo": "webpack --config test/webpack.config.js"
   },
+  "packageManager": "pnpm@10.14.0",
   "author": "guzhu",
   "license": "MIT",
   "homepage": "https://fairygui.com/",

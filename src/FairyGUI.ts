@@ -27,6 +27,18 @@ export { ScrollPane } from "./ui/ScrollPane";
 export { RelationType } from "./ui/FieldTypes";
 export { UIPackage } from "./ui/UIPackage";
 export { PackageItem } from "./ui/PackageItem";
+export {
+    PackageDecoder,
+    PackageDecodeError,
+    PackageBinaryData,
+    PackageDecodeOptions,
+    PackageDecodeErrorCode,
+    DecodedPackage,
+    DecodedPackageDependency,
+    DecodedPackageItem,
+    DecodedPackageSprite,
+    DecodedPixelHitTest
+} from "./ui/PackageDecoder";
 export { GObjectPool } from "./ui/GObjectPool";
 export { UIObjectFactory } from "./ui/UIObjectFactory";
 export { UIConfig } from "./ui/UIConfig";

@@ -25,6 +25,10 @@ export class ByteBuffer {
         return this._buffer;
     }
 
+    public get byteOffset(): number {
+        return this._view.byteOffset;
+    }
+
     public get pos(): number {
         return this._pos;
     }
