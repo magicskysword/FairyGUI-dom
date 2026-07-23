@@ -7,7 +7,15 @@
       "path": "Assets/Examples/Resources/UI/BundleUsage_fui.bytes",
       "file": "BundleUsage_fui.bytes.base64",
       "byteLength": 680,
-      "sha256": "cefac1bcd42081d0a7597e05d0b633fb6844a749f1797aaacc936470a918576e"
+      "sha256": "cefac1bcd42081d0a7597e05d0b633fb6844a749f1797aaacc936470a918576e",
+      "assets": [
+        {
+          "path": "Assets/Examples/Resources/UI/BundleUsage_atlas0.png",
+          "file": "BundleUsage/atlas0.png",
+          "byteLength": 56655,
+          "sha256": "731ffaeb846f1997e44130ecf4f81c6172e670bbee1f61ee62de1cf1ef70ca46"
+        }
+      ]
     },
     "Model": {
       "path": "Assets/Examples/Resources/UI/Model_fui.bytes",
