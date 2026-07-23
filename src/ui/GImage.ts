@@ -88,7 +88,9 @@ export class GImage extends GObject {
         this._element.scale9Grid = this._contentItem.scale9Grid;
         this._element.scaleByTile = this._contentItem.scaleByTile;
         this._element.tileGridIndice = this._contentItem.tileGridIndice;
-        this._element.src = this._contentItem.file;
+        this._element.src = this._contentItem.owner.getItemAssetURL(
+            this._contentItem
+        );
         if (this._element.scaleByTile)
             this._element.textureScale = new Vec2(this.sourceWidth, this.sourceHeight);
         else

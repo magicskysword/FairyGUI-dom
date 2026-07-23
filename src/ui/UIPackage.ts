@@ -12,11 +12,20 @@ import {
     PackageDecodeOptions,
     PackageDecoder
 } from "./PackageDecoder";
+import {
+    PackageFileResourceRequest,
+    PackageResourceDiagnostic,
+    PackageResourceResolver,
+    PackageResourceState,
+    PackageSpriteResourceRequest,
+    UIPackageResourceError
+} from "./PackageResource";
 
 type PackageDependency = { id: string, name: string };
 
 export interface UIPackageLoadOptions extends PackageDecodeOptions {
     resourceBaseURL?: string;
+    resourceResolver?: PackageResourceResolver;
 }
 
 export type UIPackageLoadErrorCode =
@@ -61,6 +70,12 @@ export class UIPackage {
     private _dependencies: Array<PackageDependency>;
     private _branches: Array<string>;
     private _sprites: { [index: string]: PackageItemSprite };
+    private _resourceResolver: PackageResourceResolver | null;
+    private _resourceState: PackageResourceState;
+    private _resourcePromise: Promise<void>;
+    private _resourceDiagnostics: Array<PackageResourceDiagnostic>;
+    private _resolvedItemAssetURLs: { [index: string]: string };
+    private _resolvedSpriteAssetURLs: { [index: string]: string };
 
     /** @internal */
     public _branchIndex: number;
@@ -72,6 +87,12 @@ export class UIPackage {
         this._dependencies = [];
         this._branches = [];
         this._sprites = {};
+        this._resourceResolver = null;
+        this._resourceState = "ready";
+        this._resourcePromise = Promise.resolve();
+        this._resourceDiagnostics = [];
+        this._resolvedItemAssetURLs = {};
+        this._resolvedSpriteAssetURLs = {};
         this._branchIndex = -1;
     }
 
@@ -119,10 +140,14 @@ export class UIPackage {
             request.send(url + "package.xml", null, "get", "arraybuffer");
             request.on("complete", (evt: Event) => {
                 try {
-                    resolve(UIPackage.loadPackageFromBuffer(evt.data, {
+                    const pkg = UIPackage.loadPackageFromBuffer(evt.data, {
                         source: url + "package.xml",
                         resourceBaseURL: url
-                    }));
+                    });
+                    pkg.waitForResources().then(
+                        () => resolve(pkg),
+                        error => reject(error)
+                    );
                 }
                 catch (error) {
                     reject(error);
@@ -220,6 +245,7 @@ export class UIPackage {
         _instByName[pkg.name] = pkg;
         if (pkg.path)
             _instById[pkg.path] = pkg;
+        pkg.startResourceLoading(options.resourceResolver || null);
         return pkg;
     }
 
@@ -465,6 +491,158 @@ export class UIPackage {
         }
     }
 
+    private startResourceLoading(
+        resolver: PackageResourceResolver | null
+    ): void {
+        this._resourceResolver = resolver;
+        if (!resolver) {
+            this._resourceState = "ready";
+            this._resourcePromise = Promise.resolve();
+            return;
+        }
+
+        this._resourceState = "loading";
+        this._resourceDiagnostics = [];
+        this._resourcePromise = Promise.resolve()
+            .then(() => this.resolveFileResources(resolver))
+            .then(() => this.resolveSpriteResources(resolver))
+            .then(() => {
+                if (this._resourceDiagnostics.length > 0) {
+                    this._resourceState = "failed";
+                    throw new UIPackageResourceError(
+                        this._id,
+                        this._name,
+                        this._resourceDiagnostics.slice()
+                    );
+                }
+                this._resourceState = "ready";
+            });
+
+        // Keep the background task observable through waitForResources without
+        // producing an unhandled rejection before callers attach their waiter.
+        this._resourcePromise.catch(() => undefined);
+    }
+
+    private resolveFileResources(
+        resolver: PackageResourceResolver
+    ): Promise<void> {
+        const tasks = this._items
+            .filter(item => !!item.file)
+            .map(item => {
+                const request: PackageFileResourceRequest = {
+                    kind: "file",
+                    packageId: this._id,
+                    packageName: this._name,
+                    item,
+                    sourceURL: item.file
+                };
+                return this.resolveResourceRequest(
+                    resolver,
+                    request,
+                    item.id
+                );
+            });
+
+        return Promise.all(tasks).then(() => undefined);
+    }
+
+    private resolveSpriteResources(
+        resolver: PackageResourceResolver
+    ): Promise<void> {
+        const tasks: Array<Promise<void>> = [];
+        for (const itemId in this._sprites) {
+            const sprite = this._sprites[itemId];
+            const sourceURL = this._resolvedItemAssetURLs[sprite.atlas.id];
+            const item = this._itemsById[itemId] || null;
+            if (!sourceURL) {
+                this._resourceDiagnostics.push({
+                    code: "ATLAS_RESOURCE_UNAVAILABLE",
+                    message: "Cannot resolve sprite \""
+                        + itemId
+                        + "\" because atlas \""
+                        + sprite.atlas.id
+                        + "\" is unavailable.",
+                    requestKind: "sprite",
+                    itemId,
+                    itemName: item ? item.name : null,
+                    sourceURL: sprite.atlas.file
+                });
+                continue;
+            }
+
+            const request: PackageSpriteResourceRequest = {
+                kind: "sprite",
+                packageId: this._id,
+                packageName: this._name,
+                item,
+                sprite,
+                sourceURL
+            };
+            tasks.push(this.resolveResourceRequest(
+                resolver,
+                request,
+                itemId
+            ));
+        }
+
+        return Promise.all(tasks).then(() => undefined);
+    }
+
+    private resolveResourceRequest(
+        resolver: PackageResourceResolver,
+        request: PackageFileResourceRequest | PackageSpriteResourceRequest,
+        assetId: string
+    ): Promise<void> {
+        return Promise.resolve()
+            .then(() => resolver.resolve(request))
+            .then(resolvedURL => {
+                if (typeof resolvedURL !== "string" || !resolvedURL) {
+                    this._resourceDiagnostics.push({
+                        code: "INVALID_RESOURCE_RESULT",
+                        message: "Resource resolver returned an empty or non-string URL for \""
+                            + assetId
+                            + "\".",
+                        requestKind: request.kind,
+                        itemId: assetId,
+                        itemName: request.kind === "file"
+                            ? request.item.name
+                            : request.item
+                                ? request.item.name
+                                : null,
+                        sourceURL: request.sourceURL
+                    });
+                    return;
+                }
+
+                if (request.kind === "file")
+                    this._resolvedItemAssetURLs[assetId] = resolvedURL;
+                else
+                    this._resolvedSpriteAssetURLs[assetId] = resolvedURL;
+            })
+            .catch(error => {
+                const detail = error instanceof Error
+                    ? error.message
+                    : String(error);
+                this._resourceDiagnostics.push({
+                    code: "RESOURCE_RESOLUTION_FAILED",
+                    message: "Cannot resolve "
+                        + request.kind
+                        + " resource \""
+                        + assetId
+                        + "\": "
+                        + detail,
+                    requestKind: request.kind,
+                    itemId: assetId,
+                    itemName: request.kind === "file"
+                        ? request.item.name
+                        : request.item
+                            ? request.item.name
+                            : null,
+                    sourceURL: request.sourceURL
+                });
+            });
+    }
+
     public dispose(): void {
 
     }
@@ -479,6 +657,10 @@ export class UIPackage {
 
     public get path(): string {
         return this._path;
+    }
+
+    public get resourceState(): PackageResourceState {
+        return this._resourceState;
     }
 
     public get dependencies(): Array<PackageDependency> {
@@ -517,8 +699,24 @@ export class UIPackage {
         return this._sprites[itemId] || null;
     }
 
+    public waitForResources(): Promise<void> {
+        return this._resourcePromise;
+    }
+
+    public getResourceDiagnostics(): ReadonlyArray<PackageResourceDiagnostic> {
+        return this._resourceDiagnostics.slice();
+    }
+
     public getItemAssetURL(item: PackageItem): string {
-        return item.file;
+        if (!item)
+            return null;
+        return this._resolvedSpriteAssetURLs[item.id]
+            || this._resolvedItemAssetURLs[item.id]
+            || item.file;
+    }
+
+    public getSpriteAssetURL(itemId: string): string | null {
+        return this._resolvedSpriteAssetURLs[itemId] || null;
     }
 }
 

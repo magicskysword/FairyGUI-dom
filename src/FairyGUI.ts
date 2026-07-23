@@ -37,6 +37,16 @@ export {
     PackagePixelHitTestData
 } from "./ui/PackageItem";
 export {
+    PackageResourceState,
+    PackageFileResourceRequest,
+    PackageSpriteResourceRequest,
+    PackageResourceRequest,
+    PackageResourceResolver,
+    PackageResourceDiagnosticCode,
+    PackageResourceDiagnostic,
+    UIPackageResourceError
+} from "./ui/PackageResource";
+export {
     PackageDecoder,
     PackageDecodeError,
     PackageBinaryData,

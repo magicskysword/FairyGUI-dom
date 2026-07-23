@@ -1010,7 +1010,7 @@ export class Transition {
                     if (value.audioClip == null) {
                         var pi: PackageItem = UIPackage.getItemByURL(value.sound);
                         if (pi)
-                            value.audioClip = pi.file;
+                            value.audioClip = pi.owner.getItemAssetURL(pi);
                         else
                             value.audioClip = value.sound;
                     }

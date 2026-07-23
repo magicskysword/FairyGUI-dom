@@ -525,7 +525,7 @@ export class GButton extends GComponent {
         if (this._sound) {
             var pi: PackageItem = UIPackage.getItemByURL(this._sound);
             if (pi)
-                GRoot.playOneShotSound(pi.file);
+                GRoot.playOneShotSound(pi.owner.getItemAssetURL(pi));
             else
                 GRoot.playOneShotSound(this._sound);
         }

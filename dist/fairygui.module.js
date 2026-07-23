@@ -4249,7 +4249,7 @@ class GImage extends GObject {
         this._element.scale9Grid = this._contentItem.scale9Grid;
         this._element.scaleByTile = this._contentItem.scaleByTile;
         this._element.tileGridIndice = this._contentItem.tileGridIndice;
-        this._element.src = this._contentItem.file;
+        this._element.src = this._contentItem.owner.getItemAssetURL(this._contentItem);
         if (this._element.scaleByTile)
             this._element.textureScale = new Vec2(this.sourceWidth, this.sourceHeight);
         else
@@ -5096,6 +5096,24 @@ function readBytes(buffer, count, source, rootByteOffset) {
     return bytes;
 }
 
+class UIPackageResourceError extends Error {
+    constructor(packageId, packageName, diagnostics) {
+        super("Cannot finish loading resources for FairyGUI package \""
+            + packageName
+            + "\" ("
+            + packageId
+            + "): "
+            + diagnostics.length
+            + " resource error(s).");
+        this.name = "UIPackageResourceError";
+        this.code = "RESOURCE_LOADING_FAILED";
+        this.packageId = packageId;
+        this.packageName = packageName;
+        this.diagnostics = diagnostics;
+        Object.setPrototypeOf(this, UIPackageResourceError.prototype);
+    }
+}
+
 class UIPackageLoadError extends Error {
     constructor(code, message, source, packageId, packageName) {
         super(message);
@@ -5115,6 +5133,12 @@ class UIPackage {
         this._dependencies = [];
         this._branches = [];
         this._sprites = {};
+        this._resourceResolver = null;
+        this._resourceState = "ready";
+        this._resourcePromise = Promise.resolve();
+        this._resourceDiagnostics = [];
+        this._resolvedItemAssetURLs = {};
+        this._resolvedSpriteAssetURLs = {};
         this._branchIndex = -1;
     }
     static get branch() {
@@ -5154,10 +5178,11 @@ class UIPackage {
             request.send(url + "package.xml", null, "get", "arraybuffer");
             request.on("complete", (evt) => {
                 try {
-                    resolve(UIPackage.loadPackageFromBuffer(evt.data, {
+                    const pkg = UIPackage.loadPackageFromBuffer(evt.data, {
                         source: url + "package.xml",
                         resourceBaseURL: url
-                    }));
+                    });
+                    pkg.waitForResources().then(() => resolve(pkg), error => reject(error));
                 }
                 catch (error) {
                     reject(error);
@@ -5223,6 +5248,7 @@ class UIPackage {
         _instByName[pkg.name] = pkg;
         if (pkg.path)
             _instById[pkg.path] = pkg;
+        pkg.startResourceLoading(options.resourceResolver || null);
         return pkg;
     }
     static removePackage(packageIdOrName) {
@@ -5411,6 +5437,126 @@ class UIPackage {
             };
         }
     }
+    startResourceLoading(resolver) {
+        this._resourceResolver = resolver;
+        if (!resolver) {
+            this._resourceState = "ready";
+            this._resourcePromise = Promise.resolve();
+            return;
+        }
+        this._resourceState = "loading";
+        this._resourceDiagnostics = [];
+        this._resourcePromise = Promise.resolve()
+            .then(() => this.resolveFileResources(resolver))
+            .then(() => this.resolveSpriteResources(resolver))
+            .then(() => {
+            if (this._resourceDiagnostics.length > 0) {
+                this._resourceState = "failed";
+                throw new UIPackageResourceError(this._id, this._name, this._resourceDiagnostics.slice());
+            }
+            this._resourceState = "ready";
+        });
+        // Keep the background task observable through waitForResources without
+        // producing an unhandled rejection before callers attach their waiter.
+        this._resourcePromise.catch(() => undefined);
+    }
+    resolveFileResources(resolver) {
+        const tasks = this._items
+            .filter(item => !!item.file)
+            .map(item => {
+            const request = {
+                kind: "file",
+                packageId: this._id,
+                packageName: this._name,
+                item,
+                sourceURL: item.file
+            };
+            return this.resolveResourceRequest(resolver, request, item.id);
+        });
+        return Promise.all(tasks).then(() => undefined);
+    }
+    resolveSpriteResources(resolver) {
+        const tasks = [];
+        for (const itemId in this._sprites) {
+            const sprite = this._sprites[itemId];
+            const sourceURL = this._resolvedItemAssetURLs[sprite.atlas.id];
+            const item = this._itemsById[itemId] || null;
+            if (!sourceURL) {
+                this._resourceDiagnostics.push({
+                    code: "ATLAS_RESOURCE_UNAVAILABLE",
+                    message: "Cannot resolve sprite \""
+                        + itemId
+                        + "\" because atlas \""
+                        + sprite.atlas.id
+                        + "\" is unavailable.",
+                    requestKind: "sprite",
+                    itemId,
+                    itemName: item ? item.name : null,
+                    sourceURL: sprite.atlas.file
+                });
+                continue;
+            }
+            const request = {
+                kind: "sprite",
+                packageId: this._id,
+                packageName: this._name,
+                item,
+                sprite,
+                sourceURL
+            };
+            tasks.push(this.resolveResourceRequest(resolver, request, itemId));
+        }
+        return Promise.all(tasks).then(() => undefined);
+    }
+    resolveResourceRequest(resolver, request, assetId) {
+        return Promise.resolve()
+            .then(() => resolver.resolve(request))
+            .then(resolvedURL => {
+            if (typeof resolvedURL !== "string" || !resolvedURL) {
+                this._resourceDiagnostics.push({
+                    code: "INVALID_RESOURCE_RESULT",
+                    message: "Resource resolver returned an empty or non-string URL for \""
+                        + assetId
+                        + "\".",
+                    requestKind: request.kind,
+                    itemId: assetId,
+                    itemName: request.kind === "file"
+                        ? request.item.name
+                        : request.item
+                            ? request.item.name
+                            : null,
+                    sourceURL: request.sourceURL
+                });
+                return;
+            }
+            if (request.kind === "file")
+                this._resolvedItemAssetURLs[assetId] = resolvedURL;
+            else
+                this._resolvedSpriteAssetURLs[assetId] = resolvedURL;
+        })
+            .catch(error => {
+            const detail = error instanceof Error
+                ? error.message
+                : String(error);
+            this._resourceDiagnostics.push({
+                code: "RESOURCE_RESOLUTION_FAILED",
+                message: "Cannot resolve "
+                    + request.kind
+                    + " resource \""
+                    + assetId
+                    + "\": "
+                    + detail,
+                requestKind: request.kind,
+                itemId: assetId,
+                itemName: request.kind === "file"
+                    ? request.item.name
+                    : request.item
+                        ? request.item.name
+                        : null,
+                sourceURL: request.sourceURL
+            });
+        });
+    }
     dispose() {
     }
     get id() {
@@ -5421,6 +5567,9 @@ class UIPackage {
     }
     get path() {
         return this._path;
+    }
+    get resourceState() {
+        return this._resourceState;
     }
     get dependencies() {
         return this._dependencies;
@@ -5450,8 +5599,21 @@ class UIPackage {
     getSpriteByItemId(itemId) {
         return this._sprites[itemId] || null;
     }
+    waitForResources() {
+        return this._resourcePromise;
+    }
+    getResourceDiagnostics() {
+        return this._resourceDiagnostics.slice();
+    }
     getItemAssetURL(item) {
-        return item.file;
+        if (!item)
+            return null;
+        return this._resolvedSpriteAssetURLs[item.id]
+            || this._resolvedItemAssetURLs[item.id]
+            || item.file;
+    }
+    getSpriteAssetURL(itemId) {
+        return this._resolvedSpriteAssetURLs[itemId] || null;
     }
 }
 var _instById = {};
@@ -8424,7 +8586,7 @@ class Transition {
                     if (value.audioClip == null) {
                         var pi = UIPackage.getItemByURL(value.sound);
                         if (pi)
-                            value.audioClip = pi.file;
+                            value.audioClip = pi.owner.getItemAssetURL(pi);
                         else
                             value.audioClip = value.sound;
                     }
@@ -11195,7 +11357,7 @@ class GLoader extends GObject {
             if (this._autoSize)
                 this.setSize(this.sourceWidth, this.sourceHeight);
             if (this._contentItem.type == PackageItemType.Image) {
-                this._content.src = this._contentItem.file;
+                this._content.src = this._contentItem.owner.getItemAssetURL(this._contentItem);
                 this._content.scale9Grid = this._contentItem.scale9Grid;
                 this._content.scaleByTile = this._contentItem.scaleByTile;
                 this._content.tileGridIndice = this._contentItem.tileGridIndice;
@@ -12024,7 +12186,7 @@ class GButton extends GComponent {
         if (this._sound) {
             var pi = UIPackage.getItemByURL(this._sound);
             if (pi)
-                GRoot$1.playOneShotSound(pi.file);
+                GRoot$1.playOneShotSound(pi.owner.getItemAssetURL(pi));
             else
                 GRoot$1.playOneShotSound(this._sound);
         }
@@ -18659,4 +18821,4 @@ class XML {
     }
 }
 
-export { AsyncOperation, AutoSizeType, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageLoadError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, defaultParser, distance, lerp, repeat };
+export { AsyncOperation, AutoSizeType, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, defaultParser, distance, lerp, repeat };

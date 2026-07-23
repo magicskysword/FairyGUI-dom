@@ -217,7 +217,9 @@ export class GLoader extends GObject {
                 this.setSize(this.sourceWidth, this.sourceHeight);
 
             if (this._contentItem.type == PackageItemType.Image) {
-                this._content.src = this._contentItem.file;
+                this._content.src = this._contentItem.owner.getItemAssetURL(
+                    this._contentItem
+                );
                 this._content.scale9Grid = this._contentItem.scale9Grid;
                 this._content.scaleByTile = this._contentItem.scaleByTile;
                 this._content.tileGridIndice = this._contentItem.tileGridIndice;
