@@ -1,0 +1,29 @@
+{
+  "producer": {
+    "repository": "https://github.com/OpenFairyGUI/OpenFairyGUI",
+    "commit": "d56053c378d1e68bed2db28d118c63945a771073",
+    "version": "0.1.1"
+  },
+  "source": {
+    "repository": "https://github.com/fairygui/FairyGUI-unity",
+    "commit": "8cc8f214cca79685532eef13372d0a4f74acdf08",
+    "project": "UIProject/FairyGUI-Unity-Examples.fairy",
+    "package": "BundleUsage"
+  },
+  "publish": {
+    "projectType": "unity",
+    "compressed": false
+  },
+  "files": [
+    {
+      "file": "BundleUsage_fui.bytes",
+      "byteLength": 697,
+      "sha256": "51ab0a25f9123b93d30c7694cddb2b6a4bdc3a0ac9da02095a1d6506970ad928"
+    },
+    {
+      "file": "BundleUsage_atlas0.png",
+      "byteLength": 57725,
+      "sha256": "3c27056ff0470f881616d07a65224bb96c9aeb91b5eb01a4a087aebf59e88b23"
+    }
+  ]
+}

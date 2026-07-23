@@ -67,17 +67,41 @@
         }
 
         async function startPreview() {
-            const packageResponse = await fetch(
-                "../fixtures/unity-5.2/BundleUsage_fui.bytes.base64"
-            );
+            const fixtureName = new URLSearchParams(location.search)
+                .get("fixture") || "unity";
+            const fixtures = {
+                unity: {
+                    packageURL: "../fixtures/unity-5.2/BundleUsage_fui.bytes.base64",
+                    encoding: "base64",
+                    source: "FairyGUI-unity/BundleUsage_fui.bytes",
+                    resourceBaseURL: "../fixtures/unity-5.2/BundleUsage",
+                    resourceURLResolver: null
+                },
+                openfairygui: {
+                    packageURL: "../fixtures/openfairygui-0.1.1/BundleUsage_fui.bytes",
+                    encoding: "binary",
+                    source: "OpenFairyGUI/BundleUsage_fui.bytes",
+                    resourceBaseURL: "../fixtures/openfairygui-0.1.1",
+                    resourceURLResolver:
+                        fgui.createUnityPackageResourceURLResolver()
+                }
+            };
+            const fixture = fixtures[fixtureName];
+            if (!fixture)
+                throw new Error("未知浏览器验收夹具：" + fixtureName);
+
+            const packageResponse = await fetch(fixture.packageURL);
             if (!packageResponse.ok)
                 throw new Error("无法读取 Unity 包测试夹具。");
 
-            const packageBytes = decodeBase64(await packageResponse.text());
+            const packageBytes = fixture.encoding === "base64"
+                ? decodeBase64(await packageResponse.text())
+                : new Uint8Array(await packageResponse.arrayBuffer());
             const root = fgui.GRoot.inst;
             const pkg = fgui.UIPackage.loadPackageFromBuffer(packageBytes, {
-                source: "FairyGUI-unity/BundleUsage_fui.bytes",
-                resourceBaseURL: "../fixtures/unity-5.2/BundleUsage"
+                source: fixture.source,
+                resourceBaseURL: fixture.resourceBaseURL,
+                resourceURLResolver: fixture.resourceURLResolver
             });
             await pkg.waitForResources();
 
@@ -104,6 +128,7 @@
             );
             const result = {
                 status: "ready",
+                fixture: fixtureName,
                 packageId: pkg.id,
                 packageName: pkg.name,
                 resourceState: pkg.resourceState,
