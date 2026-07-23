@@ -1,13 +1,13 @@
 {
-  "name": "fairygui-dom",
-  "version": "1.0.0",
+  "name": "@magicskysword/fairygui-dom",
+  "version": "1.1.0",
   "description": "A GUI Editor & framework for DOM",
   "main": "dist/fairygui.js",
   "module": "dist/fairygui.module.js",
   "types": "build/FairyGUI.d.ts",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fairygui/FairyGUI-dom"
+    "url": "git+https://github.com/magicskysword/FairyGUI-dom.git"
   },
   "files": [
     "dist/fairygui.js",

@@ -13,7 +13,7 @@ Step 1, we use the editor to create the UI.
 Step 2, we only need a little code to display it.
 
 ```javascript
-import * as fgui from "fairygui-dom";
+import * as fgui from "@magicskysword/fairygui-dom";
 
 async function start() {
     await fgui.UIPackage.loadPackage("assets/Package1");
