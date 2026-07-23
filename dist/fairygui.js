@@ -5099,6 +5099,7 @@
             this._itemsByName = {};
             this._dependencies = [];
             this._branches = [];
+            this._sprites = {};
             this._branchIndex = -1;
         }
         static get branch() {
@@ -5202,7 +5203,7 @@
                 }
             }
             const pkg = new UIPackage();
-            pkg.loadDecodedPackage(decoded, resourceBaseURL);
+            pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
             _instById[pkg.id] = pkg;
             _instByName[pkg.name] = pkg;
             if (pkg.path)
@@ -5282,7 +5283,7 @@
             var srcName = url.substr(pos2 + 1);
             return UIPackage.getItemURL(pkgName, srcName);
         }
-        loadDecodedPackage(decoded, resourceBaseURL) {
+        loadDecodedPackage(decoded, resourceBaseURL, source) {
             this._path = resourceBaseURL;
             this._id = decoded.id;
             this._name = decoded.name;
@@ -5341,6 +5342,38 @@
                 if (pi.name != null)
                     this._itemsByName[pi.name] = pi;
             }
+            for (const decodedSprite of decoded.sprites) {
+                if (this._sprites[decodedSprite.itemId]) {
+                    throw packageLoadError("DUPLICATE_SPRITE", source, decoded, "Image item \""
+                        + decodedSprite.itemId
+                        + "\" has more than one sprite mapping.");
+                }
+                const imageItem = this._itemsById[decodedSprite.itemId];
+                const atlasItem = this._itemsById[decodedSprite.atlasId];
+                if (!atlasItem || atlasItem.type !== exports.PackageItemType.Atlas) {
+                    throw packageLoadError("INVALID_SPRITE_REFERENCE", source, decoded, "Sprite \""
+                        + decodedSprite.itemId
+                        + "\" references missing or invalid atlas item \""
+                        + decodedSprite.atlasId
+                        + "\".");
+                }
+                const sprite = {
+                    itemId: decodedSprite.itemId,
+                    atlas: atlasItem,
+                    x: decodedSprite.x,
+                    y: decodedSprite.y,
+                    width: decodedSprite.width,
+                    height: decodedSprite.height,
+                    rotated: decodedSprite.rotated,
+                    offsetX: decodedSprite.offset.x,
+                    offsetY: decodedSprite.offset.y,
+                    originalWidth: decodedSprite.originalSize.width,
+                    originalHeight: decodedSprite.originalSize.height
+                };
+                this._sprites[sprite.itemId] = sprite;
+                if (imageItem && imageItem.type === exports.PackageItemType.Image)
+                    imageItem.sprite = sprite;
+            }
         }
         dispose() {
         }
@@ -5377,6 +5410,9 @@
         }
         getItemByName(resName) {
             return this._itemsByName[resName];
+        }
+        getSpriteByItemId(itemId) {
+            return this._sprites[itemId] || null;
         }
         getItemAssetURL(item) {
             return item.file;

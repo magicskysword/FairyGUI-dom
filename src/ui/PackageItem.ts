@@ -4,6 +4,20 @@ import { UIPackage } from "./UIPackage";
 import { Margin } from "../math/Margin";
 import { UIConfig } from "./UIConfig";
 
+export interface PackageItemSprite {
+    readonly itemId: string;
+    readonly atlas: PackageItem;
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly rotated: boolean;
+    readonly offsetX: number;
+    readonly offsetY: number;
+    readonly originalWidth: number;
+    readonly originalHeight: number;
+}
+
 export class PackageItem {
     public owner: UIPackage;
 
@@ -26,6 +40,7 @@ export class PackageItem {
     public scaleByTile?: boolean;
     public tileGridIndice?: number;
     public smoothing?: boolean;
+    public sprite?: PackageItemSprite;
 
     //movieclip
     public interval?: number;

@@ -1,0 +1,19 @@
+{
+  "repository": "https://github.com/fairygui/FairyGUI-unity",
+  "commit": "8cc8f214cca79685532eef13372d0a4f74acdf08",
+  "encoding": "base64",
+  "fixtures": {
+    "BundleUsage": {
+      "path": "Assets/Examples/Resources/UI/BundleUsage_fui.bytes",
+      "file": "BundleUsage_fui.bytes.base64",
+      "byteLength": 680,
+      "sha256": "cefac1bcd42081d0a7597e05d0b633fb6844a749f1797aaacc936470a918576e"
+    },
+    "Model": {
+      "path": "Assets/Examples/Resources/UI/Model_fui.bytes",
+      "file": "Model_fui.bytes.base64",
+      "byteLength": 1086,
+      "sha256": "bdbbb5cfd7eece876e26743c83fd47a0860b34218513d16826df0619c1e1c95c"
+    }
+  }
+}

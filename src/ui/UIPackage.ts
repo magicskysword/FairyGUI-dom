@@ -1,6 +1,6 @@
 import { PackageItemType } from "./FieldTypes";
 import { constructingDepth, GObject } from "./GObject";
-import { PackageItem } from "./PackageItem";
+import { PackageItem, PackageItemSprite } from "./PackageItem";
 import { ByteBuffer } from "../utils/ByteBuffer";
 import { HttpRequest } from "../utils/HttpRequest";
 import { Event } from "../event/Event";
@@ -22,7 +22,9 @@ export interface UIPackageLoadOptions extends PackageDecodeOptions {
 export type UIPackageLoadErrorCode =
     | "PACKAGE_ID_CONFLICT"
     | "PACKAGE_NAME_CONFLICT"
-    | "PACKAGE_PATH_CONFLICT";
+    | "PACKAGE_PATH_CONFLICT"
+    | "INVALID_SPRITE_REFERENCE"
+    | "DUPLICATE_SPRITE";
 
 export class UIPackageLoadError extends Error {
     public readonly code: UIPackageLoadErrorCode;
@@ -56,6 +58,7 @@ export class UIPackage {
     private _itemsByName: { [index: string]: PackageItem };
     private _dependencies: Array<PackageDependency>;
     private _branches: Array<string>;
+    private _sprites: { [index: string]: PackageItemSprite };
 
     /** @internal */
     public _branchIndex: number;
@@ -66,6 +69,7 @@ export class UIPackage {
         this._itemsByName = {};
         this._dependencies = [];
         this._branches = [];
+        this._sprites = {};
         this._branchIndex = -1;
     }
 
@@ -209,7 +213,7 @@ export class UIPackage {
         }
 
         const pkg = new UIPackage();
-        pkg.loadDecodedPackage(decoded, resourceBaseURL);
+        pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
         _instById[pkg.id] = pkg;
         _instByName[pkg.name] = pkg;
         if (pkg.path)
@@ -305,7 +309,8 @@ export class UIPackage {
 
     private loadDecodedPackage(
         decoded: DecodedPackage,
-        resourceBaseURL: string
+        resourceBaseURL: string,
+        source: string
     ): void {
         this._path = resourceBaseURL;
         this._id = decoded.id;
@@ -376,6 +381,51 @@ export class UIPackage {
             if (pi.name != null)
                 this._itemsByName[pi.name] = pi;
         }
+
+        for (const decodedSprite of decoded.sprites) {
+            if (this._sprites[decodedSprite.itemId]) {
+                throw packageLoadError(
+                    "DUPLICATE_SPRITE",
+                    source,
+                    decoded,
+                    "Image item \""
+                        + decodedSprite.itemId
+                        + "\" has more than one sprite mapping."
+                );
+            }
+
+            const imageItem = this._itemsById[decodedSprite.itemId];
+            const atlasItem = this._itemsById[decodedSprite.atlasId];
+            if (!atlasItem || atlasItem.type !== PackageItemType.Atlas) {
+                throw packageLoadError(
+                    "INVALID_SPRITE_REFERENCE",
+                    source,
+                    decoded,
+                    "Sprite \""
+                        + decodedSprite.itemId
+                        + "\" references missing or invalid atlas item \""
+                        + decodedSprite.atlasId
+                        + "\"."
+                );
+            }
+
+            const sprite: PackageItemSprite = {
+                itemId: decodedSprite.itemId,
+                atlas: atlasItem,
+                x: decodedSprite.x,
+                y: decodedSprite.y,
+                width: decodedSprite.width,
+                height: decodedSprite.height,
+                rotated: decodedSprite.rotated,
+                offsetX: decodedSprite.offset.x,
+                offsetY: decodedSprite.offset.y,
+                originalWidth: decodedSprite.originalSize.width,
+                originalHeight: decodedSprite.originalSize.height
+            };
+            this._sprites[sprite.itemId] = sprite;
+            if (imageItem && imageItem.type === PackageItemType.Image)
+                imageItem.sprite = sprite;
+        }
     }
 
     public dispose(): void {
@@ -424,6 +474,10 @@ export class UIPackage {
 
     public getItemByName(resName: string): PackageItem {
         return this._itemsByName[resName];
+    }
+
+    public getSpriteByItemId(itemId: string): PackageItemSprite | null {
+        return this._sprites[itemId] || null;
     }
 
     public getItemAssetURL(item: PackageItem): string {
