@@ -1,5 +1,5 @@
 import { Event } from "../event/Event";
-import { InputTextField } from "../FairyGUI";
+import { InputTextField } from "../core/InputTextField";
 import { Rect } from "../math/Rect";
 import { Vec2 } from "../math/Vec2";
 import { ByteBuffer } from "../utils/ByteBuffer";
@@ -191,7 +191,7 @@ export class GList extends GComponent {
     }
 
     public set defaultItem(val: string) {
-        this._defaultItem = val;
+        this._defaultItem = UIPackage.normalizeURL(val);
     }
 
     public get autoResizeItem(): boolean {

@@ -151,9 +151,10 @@ export class GGroup extends GObject {
         var ar: number = Number.NEGATIVE_INFINITY, ab: number = Number.NEGATIVE_INFINITY;
         var tmp: number;
         var empty: boolean = true;
+        var skipInvisibles: boolean = this._layout != GroupLayoutType.None && this._excludeInvisibles;
         for (i = 0; i < cnt; i++) {
             child = this._parent.getChildAt(i);
-            if (child.group != this || this._excludeInvisibles && !child.internalVisible3)
+            if (child.group != this || skipInvisibles && !child.internalVisible3)
                 continue;
 
             tmp = child.xMin;

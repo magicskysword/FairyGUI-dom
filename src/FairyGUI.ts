@@ -1,4 +1,12 @@
 export { GGroup } from "./ui/GGroup";
+export {
+    FAIRYGUI_DOM_CAPABILITIES,
+    getFairyGUIDomCapability,
+    FairyGUIDomCapability,
+    FairyGUIDomCapabilityAccess,
+    FairyGUIDomCapabilityState,
+    FairyGUIDomFidelity
+} from "./AuthoringCapabilities";
 export { GObject } from "./ui/GObject";
 export { GGraph } from "./ui/GGraph";
 export { GImage } from "./ui/GImage";

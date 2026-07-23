@@ -3828,9 +3828,10 @@ class GGroup extends GObject {
         var ar = Number.NEGATIVE_INFINITY, ab = Number.NEGATIVE_INFINITY;
         var tmp;
         var empty = true;
+        var skipInvisibles = this._layout != GroupLayoutType.None && this._excludeInvisibles;
         for (i = 0; i < cnt; i++) {
             child = this._parent.getChildAt(i);
-            if (child.group != this || this._excludeInvisibles && !child.internalVisible3)
+            if (child.group != this || skipInvisibles && !child.internalVisible3)
                 continue;
             tmp = child.xMin;
             if (tmp < ax)
@@ -4071,6 +4072,50 @@ class GGroup extends GObject {
         if (!this.visible)
             this.handleVisibleChanged();
     }
+}
+
+function capability(id, state, access) {
+    return Object.freeze({
+        id,
+        state,
+        access,
+        fidelity: "structural-preview"
+    });
+}
+/**
+ * Authoring capabilities shared with FairyGUI-MCP-Headless.
+ *
+ * This registry describes the V1 editable surface rather than every runtime
+ * feature already present in FairyGUI-dom.
+ */
+const FAIRYGUI_DOM_CAPABILITIES = Object.freeze([
+    capability("node.image", "implemented", "read-write"),
+    capability("node.text", "implemented", "read-write"),
+    capability("node.rich-text", "implemented", "read-write"),
+    capability("node.input-text", "implemented", "read-write"),
+    capability("node.loader", "implemented", "read-write"),
+    capability("node.graph", "implemented", "read-write"),
+    capability("node.movie-clip", "implemented", "read-write"),
+    capability("node.group", "implemented", "read-write"),
+    capability("node.list-static", "implemented", "read-write"),
+    capability("node.instance", "implemented", "read-write"),
+    capability("node.component-root", "implemented", "read-write"),
+    capability("layout.absolute", "implemented", "read-write"),
+    capability("layout.relations", "implemented", "read-write"),
+    capability("layout.component-overflow", "implemented", "read-write"),
+    capability("layout.list-static", "implemented", "read-write"),
+    capability("layout.group", "implemented", "read-write"),
+    capability("node.tree", "planned", "read-only"),
+    capability("list.virtual", "planned", "read-only"),
+    capability("layout.controller-gear", "planned", "read-only"),
+    capability("animation.transition", "planned", "read-only"),
+    capability("node.loader3d", "planned", "read-only"),
+    capability("resource.skeleton", "planned", "read-only"),
+    capability("extension.custom", "planned", "read-only")
+]);
+const CAPABILITIES_BY_ID = new Map(FAIRYGUI_DOM_CAPABILITIES.map((entry) => [entry.id, entry]));
+function getFairyGUIDomCapability(id) {
+    return CAPABILITIES_BY_ID.get(id);
 }
 
 class GGraph extends GObject {
@@ -13410,6 +13455,645 @@ class GScrollBar extends GComponent {
     }
 }
 
+class UIElement extends HTMLDivElement {
+    constructor() {
+        super();
+        this._timerID = 0;
+        this._children = [];
+        this._pos = new Vec2();
+        this._scale = new Vec2(1, 1);
+        this._rot = 0;
+        this._pivot = new Vec2();
+        this._contentRect = new Rect();
+        this._alpha = 1;
+        this._touchable = true;
+        this._visible = true;
+        this._opaque = true;
+    }
+    get name() {
+        return this.id;
+    }
+    set name(value) {
+        this.id = value;
+    }
+    get x() {
+        return this._pos.x;
+    }
+    set x(value) {
+        this.setPosition(value, this._pos.y);
+    }
+    get y() {
+        return this._pos.y;
+    }
+    set y(value) {
+        this.setPosition(this._pos.x, value);
+    }
+    setPosition(x, y) {
+        if (this._pos.x != x || this._pos.y != y) {
+            this._pos.set(x, y);
+            this.style.left = x + "px";
+            this.style.top = y + "px";
+        }
+    }
+    get width() {
+        return this._contentRect.width;
+    }
+    set width(value) {
+        if (this._contentRect.width != value) {
+            this._contentRect.width = value;
+            this.onSizeChanged();
+        }
+    }
+    get height() {
+        return this._contentRect.height;
+    }
+    set height(value) {
+        if (this._contentRect.height != value) {
+            this._contentRect.height = value;
+            this.onSizeChanged();
+        }
+    }
+    setSize(wv, hv) {
+        if (wv != this._contentRect.width || hv != this._contentRect.height) {
+            this._contentRect.width = wv;
+            this._contentRect.height = hv;
+            this.onSizeChanged();
+        }
+    }
+    onSizeChanged() {
+        this.style.width = this._contentRect.width + "px";
+        this.style.height = this._contentRect.height + "px";
+    }
+    get pivotX() {
+        return this._pivot.x;
+    }
+    set pivotX(value) {
+        this.setPivot(value, this._pivot.y);
+    }
+    get pivotY() {
+        return this._pivot.y;
+    }
+    set pivotY(value) {
+        this.setPosition(this._pivot.x, value);
+    }
+    setPivot(xv, yv) {
+        if (this._pivot.x != xv || this._pivot.y != yv) {
+            this._pivot.set(xv, yv);
+            this.style.transformOrigin = this._pivot.x + "%," + this._pivot.y + "%";
+        }
+    }
+    get flip() {
+        if (this._flipX)
+            return this._flipY ? FlipType.Both : FlipType.Horizontal;
+        else if (this._flipY)
+            return this._flipX ? FlipType.Both : FlipType.Vertical;
+        else
+            return FlipType.None;
+    }
+    set flip(value) {
+        let a = value == FlipType.Both || value == FlipType.Horizontal;
+        let b = value == FlipType.Both || value == FlipType.Vertical;
+        if (a != this._flipX || b != this._flipY)
+            this._flipX = a;
+        this._flipY = b;
+        this.updateTransform();
+    }
+    get cursor() {
+        return this._cursor;
+    }
+    set cursor(value) {
+        this._cursor = value;
+    }
+    updateTransform() {
+        if (this._timerID != 0)
+            return;
+        this._timerID = window.requestAnimationFrame(() => {
+            this._timerID = 0;
+            let str = [];
+            if (this._scale.x != 1 || this._flipX) {
+                str.push("scaleX(");
+                str.push("" + this._scale.x * (this._flipX ? -1 : 1));
+                str.push(") ");
+            }
+            if (this._scale.y != 1 || this._flipY) {
+                str.push("scaleY(");
+                str.push("" + this._scale.y * (this._flipY ? -1 : 1));
+                str.push(") ");
+            }
+            if (this._rot != 0) {
+                str.push("rotate(");
+                str.push("" + this._rot);
+                str.push("deg) ");
+            }
+            if (str.length > 0) {
+                this.style.transform = str.join("");
+                if (this._flipX || this._flipY)
+                    this.style.transformOrigin = "%50 %50";
+                else
+                    this.style.transformOrigin = (this._pivot.x * 100) + "% " + (this._pivot.y * 100) + "%";
+            }
+            else
+                this.style.transform = "none";
+        });
+    }
+    updateFilters() {
+        let filter = "";
+        if (this._grayed)
+            filter += "grayscale(100%)";
+        this.style.filter = filter;
+    }
+    get scaleX() {
+        return this._scale.x;
+    }
+    set scaleX(value) {
+        this.setScale(value, this._scale.y);
+    }
+    get scaleY() {
+        return this._scale.y;
+    }
+    set scaleY(value) {
+        this.setScale(this._scale.x, value);
+    }
+    setScale(xv, yv) {
+        if (this._scale.x != xv || this._scale.y != yv) {
+            this._scale.set(xv, yv);
+            this.updateTransform();
+        }
+    }
+    get rotation() {
+        return this._rot;
+    }
+    set rotation(value) {
+        if (this._rot != value) {
+            this._rot = value;
+            this.updateTransform();
+        }
+    }
+    get parent() {
+        return this._parent;
+    }
+    get alpha() {
+        return this._alpha;
+    }
+    set alpha(value) {
+        if (this._alpha != value) {
+            this._alpha = value;
+            this.style.opacity = this._alpha.toFixed(3);
+        }
+    }
+    get touchable() {
+        return this._touchable;
+    }
+    set touchable(value) {
+        if (this._touchable != value) {
+            this._touchable = value;
+            this.updateTouchableFlag();
+        }
+    }
+    get opaque() {
+        return this._opaque;
+    }
+    set opaque(value) {
+        if (this._opaque != value) {
+            this._opaque = value;
+            this.updateTouchableFlag();
+        }
+    }
+    updateTouchableFlag() {
+        let str;
+        if (!this._touchable || !this._opaque || this._touchDisabled)
+            str = "none";
+        else if (this._parent && !this._parent._opaque)
+            str = "auto";
+        else
+            str = "";
+        if ((this.style.pointerEvents == null ? "" : this.style.pointerEvents) != str) {
+            this.style.pointerEvents = str;
+            const children = this._children;
+            for (let i = 0, l = children.length; i < l; i++) {
+                children[i].updateTouchableFlag();
+            }
+        }
+    }
+    setNotInteractable() {
+        this._touchDisabled = true;
+        this.style.pointerEvents = "none";
+    }
+    get visible() {
+        return this._visible;
+    }
+    set visible(value) {
+        if (this._visible != value) {
+            this._visible = value;
+            if (value)
+                this.style.display = "";
+            else
+                this.style.display = "none";
+        }
+    }
+    get grayed() {
+        return this._grayed;
+    }
+    set grayed(value) {
+        if (this._grayed != value) {
+            this._grayed = value;
+            this.updateFilters();
+        }
+    }
+    // public get blendMode(): Blending {
+    //     return this._graphics ? this._graphics.material.blending : NormalBlending;
+    // }
+    // public set blendMode(value: Blending) {
+    //     if (this._graphics)
+    //         this._graphics.material.blending = value;
+    // }
+    get focusable() {
+        return !this._notFocusable;
+    }
+    set focusable(value) {
+        this._notFocusable = !value;
+    }
+    get focused() {
+        return this.stage.focusedElement == this || this.isAncestorOf(this.stage.focusedElement);
+    }
+    get tabStop() {
+        return this._tabStop;
+    }
+    set tabStop(value) {
+        if (this._tabStop != value) {
+            this._tabStop = value;
+            if (value) {
+                this.tabIndex = 0;
+                this.addEventListener("focus", () => { if (this._tabStop)
+                    this.stage.setFocus(this, true); });
+            }
+            else
+                this.tabIndex = null;
+        }
+    }
+    get tabStopChildren() {
+        return this._tabStopChildren;
+    }
+    set tabStopChildren(value) {
+        this._tabStopChildren = value;
+    }
+    get onStage() {
+        return this.getRootNode() == this.ownerDocument;
+    }
+    get stage() {
+        let p = this;
+        while (p) {
+            if (p.is_stage)
+                return p;
+            p = p.parentElement;
+        }
+        return window.fguiStage;
+    }
+    globalToLocal(x, y, result) {
+        let rect = this.getBoundingClientRect();
+        let sx = this._contentRect.width > 0 ? (rect.width / this._contentRect.width) : 1;
+        let sy = this._contentRect.height > 0 ? (rect.height / this._contentRect.height) : 1;
+        if (!result)
+            result = new Vec2();
+        result.x = (x - rect.x) / sx;
+        result.y = (y - rect.y) / sy;
+        return result;
+    }
+    localToGlobal(x, y, result) {
+        let rect = this.getBoundingClientRect();
+        let sx = this._contentRect.width > 0 ? (rect.width / this._contentRect.width) : 1;
+        let sy = this._contentRect.height > 0 ? (rect.height / this._contentRect.height) : 1;
+        if (!result)
+            result = new Vec2();
+        result.x = x * sx + rect.x;
+        result.y = y * sy + rect.y;
+        return result;
+    }
+    addChild(child) {
+        this.addChildAt(child, Number.POSITIVE_INFINITY);
+    }
+    addChildAt(child, index) {
+        if (child._parent == this)
+            this.setChildIndex(child, index);
+        else {
+            if (index > this._children.length - 1) {
+                this.appendChild(child);
+            }
+            else {
+                let refNode = this._children[index];
+                this.insertBefore(child, refNode);
+            }
+            this._children.splice(index, 0, child);
+            child._parent = this;
+            child.updateTouchableFlag();
+        }
+        if (this.getRootNode() == this.ownerDocument)
+            child.broadcastEvent("added_to_stage");
+    }
+    removeChild(child) {
+        if (child instanceof UIElement) {
+            let index = this._children.indexOf(child);
+            if (index == -1)
+                throw 'not a child';
+            this.removeChildAt(index);
+        }
+        else
+            super.removeChild(child);
+        return child;
+    }
+    removeChildAt(index) {
+        let child = this._children[index];
+        if (this.getRootNode() == this.ownerDocument) {
+            child.broadcastEvent("removed_from_stage");
+            this.stage.validateFocus(this, child);
+        }
+        this._children.splice(index, 1);
+        super.removeChild(child);
+        child._parent = null;
+    }
+    setChildIndex(child, index) {
+        let oldIndex = this._children.indexOf(child);
+        if (oldIndex == index)
+            return;
+        if (oldIndex == -1)
+            throw 'Not a child';
+        this._children.splice(oldIndex, 1);
+        if (index >= this._children.length) {
+            this._children.push(child);
+            this.appendChild(child);
+        }
+        else {
+            this._children.splice(index, 0, child);
+            if (index < oldIndex)
+                index++;
+            let refNode = this._children[index];
+            this.insertBefore(child, refNode);
+        }
+    }
+    getIndex(child) {
+        return this._children.indexOf(child);
+    }
+    get numChildren() {
+        return this._children.length;
+    }
+    isAncestorOf(child) {
+        if (child == null)
+            return false;
+        var p = child.parent;
+        while (p) {
+            if (p == this)
+                return true;
+            p = p.parent;
+        }
+        return false;
+    }
+    get clipping() {
+        return this._clipping;
+    }
+    set clipping(value) {
+        if (this._clipping != value) {
+            this._clipping = value;
+            if (this._clipping)
+                this.style.overflow = "hidden";
+            else
+                this.style.overflow = "visible";
+        }
+    }
+    init() {
+    }
+    dispose() {
+    }
+    traverseChildren(callback) {
+        callback(this);
+        const children = this._children;
+        for (let i = 0, l = children.length; i < l; i++) {
+            children[i].traverseChildren(callback);
+        }
+    }
+    traverseAncestors(callback) {
+        const parent = this._parent;
+        if (parent) {
+            callback(parent);
+            parent.traverseAncestors(callback);
+        }
+    }
+    broadcastEvent(type, data) {
+        let ev = EventPool.borrow();
+        ev._type = type;
+        ev.data = data;
+        ev._initiator = this;
+        let arr = ev._callChain;
+        this.traverseChildren(obj => {
+            if (obj.$owner && !obj.$owner.isDisposed)
+                arr.push(obj.$owner);
+        });
+        arr.forEach(obj => {
+            obj._dispatchDirect(type, ev);
+        });
+        arr.length = 0;
+        EventPool.returns(ev);
+    }
+    bubbleEvent(initiator, type, data, addChain) {
+        let ev = EventPool.borrow();
+        ev._type = type;
+        ev.data = data;
+        ev._initiator = initiator;
+        let arr = ev._callChain;
+        if (this.$owner)
+            arr.push(this.$owner);
+        this.traverseAncestors(obj => {
+            if (obj.$owner)
+                arr.push(obj.$owner);
+        });
+        let stage = this.stage;
+        for (let i = arr.length - 1; i >= 0; i--) {
+            let obj = arr[i];
+            let col = obj._listeners[type];
+            if (col && col.captures.length > 0) {
+                obj._dispatch(col, ev, true);
+                if (ev._pointerCapture) {
+                    ev._pointerCapture = false;
+                    if (type == "pointer_down")
+                        stage.addPointerMonitor(ev.input.pointerId, obj);
+                }
+            }
+        }
+        if (!ev._stopsPropagation) {
+            for (let i = 0; i < arr.length; i++) {
+                let obj = arr[i];
+                let col = obj._listeners[type];
+                if (col && col.callbacks.length > 0) {
+                    obj._dispatch(col, ev, false);
+                    if (ev._pointerCapture) {
+                        ev._pointerCapture = false;
+                        if (type == "pointer_down")
+                            stage.addPointerMonitor(ev.input.pointerId, obj);
+                    }
+                    if (ev._stopsPropagation)
+                        break;
+                }
+            }
+            if (addChain) {
+                for (let i = 0; i < addChain.length; i++) {
+                    let obj = addChain[i];
+                    if (obj && arr.indexOf(obj) == -1) {
+                        obj._dispatchDirect(type, ev);
+                    }
+                }
+            }
+        }
+        arr.length = 0;
+        EventPool.returns(ev);
+    }
+}
+
+class TextFormat {
+    constructor() {
+        this.size = 0;
+        this.color = 0;
+        this.lineSpacing = 0;
+        this.letterSpacing = 0;
+        this.outline = 0;
+        this.outlineColor = 0;
+        this.shadowOffset = new Vec2();
+        this.shadowColor = 0;
+    }
+    copy(source) {
+        this.size = source.size;
+        this.font = source.font;
+        this.color = source.color;
+        this.lineSpacing = source.lineSpacing;
+        this.letterSpacing = source.letterSpacing;
+        this.bold = source.bold;
+        this.underline = source.underline;
+        this.italic = source.italic;
+        this.strikethrough = source.strikethrough;
+        this.align = source.align;
+        this.outline = source.outline;
+        this.outlineColor = source.outlineColor;
+        this.shadowOffset.copy(source.shadowOffset);
+        this.shadowColor = source.shadowColor;
+    }
+}
+
+var isAnyEditing = false;
+class InputTextField extends UIElement {
+    constructor() {
+        super();
+        this._textFormat = new TextFormat();
+        this._text = "";
+        this._cursor = "auto";
+        this._singleLine = true;
+    }
+    init() {
+        super.init();
+        this.createElement();
+        this.addEventListener("dragstart", (evt) => {
+            if (isAnyEditing) {
+                evt.stopPropagation();
+                evt.preventDefault();
+            }
+        });
+        this.$owner.on("focus_in", () => {
+            this._input.focus();
+        });
+    }
+    get htmlInput() {
+        return this._input;
+    }
+    get textFormat() {
+        return this._textFormat;
+    }
+    applyFormat() {
+        this._input.style.textAlign = this._textFormat.align;
+        this._input.style.verticalAlign = this._textFormat.verticalAlign;
+        this._input.style.fontSize = this._textFormat.size + "px";
+        this._input.style.fontFamily = this._textFormat.font;
+        this._input.style.color = convertToHtmlColor(this._textFormat.color);
+    }
+    get text() {
+        this._text = this._input.value;
+        return this._text;
+    }
+    set text(value) {
+        this._text = value;
+        this._input.value = this._text;
+    }
+    get singleLine() {
+        return this._singleLine;
+    }
+    set singleLine(value) {
+        if (this._singleLine != value) {
+            this._singleLine = value;
+            this.createElement();
+        }
+    }
+    createElement() {
+        let old = this._input;
+        if (old)
+            this.removeChild(old);
+        let e;
+        if (this._singleLine) {
+            e = document.createElement("input");
+        }
+        else {
+            e = document.createElement("textarea");
+        }
+        this._input = e;
+        if (e instanceof HTMLInputElement) {
+            if (this._password)
+                e.type = "password";
+            else
+                e.type = "text";
+        }
+        e.value = this._text;
+        e.readOnly = old ? old.readOnly : false;
+        e.spellcheck = false;
+        e.addEventListener("focus", (evt) => { isAnyEditing = true; this.stage.setFocus(this, true); });
+        e.addEventListener("blur", () => { isAnyEditing = false; });
+        e.addEventListener("input", () => { this.$owner.emit("changed"); });
+        this.appendChild(this._input);
+    }
+    updateTouchableFlag() {
+        super.updateTouchableFlag();
+        if (isAnyEditing)
+            this._input.setSelectionRange(0, 0);
+        this._input.disabled = this.style.pointerEvents == "none";
+    }
+    setPromptText(value) {
+        this._input.placeholder = defaultParser.parse(value, true);
+    }
+    setMaxLength(value) {
+        if (value > 0)
+            this._input.maxLength = value;
+        else
+            this._input.maxLength = 524288;
+    }
+    setKeyboardType(keyboardType) {
+    }
+    setRestrict(value) {
+    }
+    get editable() {
+        return !this._input.readOnly;
+    }
+    set editable(value) {
+        this._input.readOnly = !value;
+    }
+    get password() {
+        return this._password;
+    }
+    set password(value) {
+        if (this._password != value) {
+            this._password = value;
+            if (this._input instanceof HTMLInputElement)
+                this._input.type = value ? "password" : "text";
+        }
+    }
+    setSelection(start, end) {
+        this._input.setSelectionRange(start, end);
+    }
+}
+
 class GObjectPool {
     constructor() {
         this._count = 0;
@@ -13577,7 +14261,7 @@ class GList extends GComponent {
         return this._defaultItem;
     }
     set defaultItem(val) {
-        this._defaultItem = val;
+        this._defaultItem = UIPackage.normalizeURL(val);
     }
     get autoResizeItem() {
         return this._autoResizeItem;
@@ -16659,527 +17343,6 @@ class DisplayListItem {
     }
 }
 
-class UIElement extends HTMLDivElement {
-    constructor() {
-        super();
-        this._timerID = 0;
-        this._children = [];
-        this._pos = new Vec2();
-        this._scale = new Vec2(1, 1);
-        this._rot = 0;
-        this._pivot = new Vec2();
-        this._contentRect = new Rect();
-        this._alpha = 1;
-        this._touchable = true;
-        this._visible = true;
-        this._opaque = true;
-    }
-    get name() {
-        return this.id;
-    }
-    set name(value) {
-        this.id = value;
-    }
-    get x() {
-        return this._pos.x;
-    }
-    set x(value) {
-        this.setPosition(value, this._pos.y);
-    }
-    get y() {
-        return this._pos.y;
-    }
-    set y(value) {
-        this.setPosition(this._pos.x, value);
-    }
-    setPosition(x, y) {
-        if (this._pos.x != x || this._pos.y != y) {
-            this._pos.set(x, y);
-            this.style.left = x + "px";
-            this.style.top = y + "px";
-        }
-    }
-    get width() {
-        return this._contentRect.width;
-    }
-    set width(value) {
-        if (this._contentRect.width != value) {
-            this._contentRect.width = value;
-            this.onSizeChanged();
-        }
-    }
-    get height() {
-        return this._contentRect.height;
-    }
-    set height(value) {
-        if (this._contentRect.height != value) {
-            this._contentRect.height = value;
-            this.onSizeChanged();
-        }
-    }
-    setSize(wv, hv) {
-        if (wv != this._contentRect.width || hv != this._contentRect.height) {
-            this._contentRect.width = wv;
-            this._contentRect.height = hv;
-            this.onSizeChanged();
-        }
-    }
-    onSizeChanged() {
-        this.style.width = this._contentRect.width + "px";
-        this.style.height = this._contentRect.height + "px";
-    }
-    get pivotX() {
-        return this._pivot.x;
-    }
-    set pivotX(value) {
-        this.setPivot(value, this._pivot.y);
-    }
-    get pivotY() {
-        return this._pivot.y;
-    }
-    set pivotY(value) {
-        this.setPosition(this._pivot.x, value);
-    }
-    setPivot(xv, yv) {
-        if (this._pivot.x != xv || this._pivot.y != yv) {
-            this._pivot.set(xv, yv);
-            this.style.transformOrigin = this._pivot.x + "%," + this._pivot.y + "%";
-        }
-    }
-    get flip() {
-        if (this._flipX)
-            return this._flipY ? FlipType.Both : FlipType.Horizontal;
-        else if (this._flipY)
-            return this._flipX ? FlipType.Both : FlipType.Vertical;
-        else
-            return FlipType.None;
-    }
-    set flip(value) {
-        let a = value == FlipType.Both || value == FlipType.Horizontal;
-        let b = value == FlipType.Both || value == FlipType.Vertical;
-        if (a != this._flipX || b != this._flipY)
-            this._flipX = a;
-        this._flipY = b;
-        this.updateTransform();
-    }
-    get cursor() {
-        return this._cursor;
-    }
-    set cursor(value) {
-        this._cursor = value;
-    }
-    updateTransform() {
-        if (this._timerID != 0)
-            return;
-        this._timerID = window.requestAnimationFrame(() => {
-            this._timerID = 0;
-            let str = [];
-            if (this._scale.x != 1 || this._flipX) {
-                str.push("scaleX(");
-                str.push("" + this._scale.x * (this._flipX ? -1 : 1));
-                str.push(") ");
-            }
-            if (this._scale.y != 1 || this._flipY) {
-                str.push("scaleY(");
-                str.push("" + this._scale.y * (this._flipY ? -1 : 1));
-                str.push(") ");
-            }
-            if (this._rot != 0) {
-                str.push("rotate(");
-                str.push("" + this._rot);
-                str.push("deg) ");
-            }
-            if (str.length > 0) {
-                this.style.transform = str.join("");
-                if (this._flipX || this._flipY)
-                    this.style.transformOrigin = "%50 %50";
-                else
-                    this.style.transformOrigin = (this._pivot.x * 100) + "% " + (this._pivot.y * 100) + "%";
-            }
-            else
-                this.style.transform = "none";
-        });
-    }
-    updateFilters() {
-        let filter = "";
-        if (this._grayed)
-            filter += "grayscale(100%)";
-        this.style.filter = filter;
-    }
-    get scaleX() {
-        return this._scale.x;
-    }
-    set scaleX(value) {
-        this.setScale(value, this._scale.y);
-    }
-    get scaleY() {
-        return this._scale.y;
-    }
-    set scaleY(value) {
-        this.setScale(this._scale.x, value);
-    }
-    setScale(xv, yv) {
-        if (this._scale.x != xv || this._scale.y != yv) {
-            this._scale.set(xv, yv);
-            this.updateTransform();
-        }
-    }
-    get rotation() {
-        return this._rot;
-    }
-    set rotation(value) {
-        if (this._rot != value) {
-            this._rot = value;
-            this.updateTransform();
-        }
-    }
-    get parent() {
-        return this._parent;
-    }
-    get alpha() {
-        return this._alpha;
-    }
-    set alpha(value) {
-        if (this._alpha != value) {
-            this._alpha = value;
-            this.style.opacity = this._alpha.toFixed(3);
-        }
-    }
-    get touchable() {
-        return this._touchable;
-    }
-    set touchable(value) {
-        if (this._touchable != value) {
-            this._touchable = value;
-            this.updateTouchableFlag();
-        }
-    }
-    get opaque() {
-        return this._opaque;
-    }
-    set opaque(value) {
-        if (this._opaque != value) {
-            this._opaque = value;
-            this.updateTouchableFlag();
-        }
-    }
-    updateTouchableFlag() {
-        let str;
-        if (!this._touchable || !this._opaque || this._touchDisabled)
-            str = "none";
-        else if (this._parent && !this._parent._opaque)
-            str = "auto";
-        else
-            str = "";
-        if ((this.style.pointerEvents == null ? "" : this.style.pointerEvents) != str) {
-            this.style.pointerEvents = str;
-            const children = this._children;
-            for (let i = 0, l = children.length; i < l; i++) {
-                children[i].updateTouchableFlag();
-            }
-        }
-    }
-    setNotInteractable() {
-        this._touchDisabled = true;
-        this.style.pointerEvents = "none";
-    }
-    get visible() {
-        return this._visible;
-    }
-    set visible(value) {
-        if (this._visible != value) {
-            this._visible = value;
-            if (value)
-                this.style.display = "";
-            else
-                this.style.display = "none";
-        }
-    }
-    get grayed() {
-        return this._grayed;
-    }
-    set grayed(value) {
-        if (this._grayed != value) {
-            this._grayed = value;
-            this.updateFilters();
-        }
-    }
-    // public get blendMode(): Blending {
-    //     return this._graphics ? this._graphics.material.blending : NormalBlending;
-    // }
-    // public set blendMode(value: Blending) {
-    //     if (this._graphics)
-    //         this._graphics.material.blending = value;
-    // }
-    get focusable() {
-        return !this._notFocusable;
-    }
-    set focusable(value) {
-        this._notFocusable = !value;
-    }
-    get focused() {
-        return this.stage.focusedElement == this || this.isAncestorOf(this.stage.focusedElement);
-    }
-    get tabStop() {
-        return this._tabStop;
-    }
-    set tabStop(value) {
-        if (this._tabStop != value) {
-            this._tabStop = value;
-            if (value) {
-                this.tabIndex = 0;
-                this.addEventListener("focus", () => { if (this._tabStop)
-                    this.stage.setFocus(this, true); });
-            }
-            else
-                this.tabIndex = null;
-        }
-    }
-    get tabStopChildren() {
-        return this._tabStopChildren;
-    }
-    set tabStopChildren(value) {
-        this._tabStopChildren = value;
-    }
-    get onStage() {
-        return this.getRootNode() == this.ownerDocument;
-    }
-    get stage() {
-        let p = this;
-        while (p) {
-            if (p.is_stage)
-                return p;
-            p = p.parentElement;
-        }
-        return window.fguiStage;
-    }
-    globalToLocal(x, y, result) {
-        let rect = this.getBoundingClientRect();
-        let sx = this._contentRect.width > 0 ? (rect.width / this._contentRect.width) : 1;
-        let sy = this._contentRect.height > 0 ? (rect.height / this._contentRect.height) : 1;
-        if (!result)
-            result = new Vec2();
-        result.x = (x - rect.x) / sx;
-        result.y = (y - rect.y) / sy;
-        return result;
-    }
-    localToGlobal(x, y, result) {
-        let rect = this.getBoundingClientRect();
-        let sx = this._contentRect.width > 0 ? (rect.width / this._contentRect.width) : 1;
-        let sy = this._contentRect.height > 0 ? (rect.height / this._contentRect.height) : 1;
-        if (!result)
-            result = new Vec2();
-        result.x = x * sx + rect.x;
-        result.y = y * sy + rect.y;
-        return result;
-    }
-    addChild(child) {
-        this.addChildAt(child, Number.POSITIVE_INFINITY);
-    }
-    addChildAt(child, index) {
-        if (child._parent == this)
-            this.setChildIndex(child, index);
-        else {
-            if (index > this._children.length - 1) {
-                this.appendChild(child);
-            }
-            else {
-                let refNode = this._children[index];
-                this.insertBefore(child, refNode);
-            }
-            this._children.splice(index, 0, child);
-            child._parent = this;
-            child.updateTouchableFlag();
-        }
-        if (this.getRootNode() == this.ownerDocument)
-            child.broadcastEvent("added_to_stage");
-    }
-    removeChild(child) {
-        if (child instanceof UIElement) {
-            let index = this._children.indexOf(child);
-            if (index == -1)
-                throw 'not a child';
-            this.removeChildAt(index);
-        }
-        else
-            super.removeChild(child);
-        return child;
-    }
-    removeChildAt(index) {
-        let child = this._children[index];
-        if (this.getRootNode() == this.ownerDocument) {
-            child.broadcastEvent("removed_from_stage");
-            this.stage.validateFocus(this, child);
-        }
-        this._children.splice(index, 1);
-        super.removeChild(child);
-        child._parent = null;
-    }
-    setChildIndex(child, index) {
-        let oldIndex = this._children.indexOf(child);
-        if (oldIndex == index)
-            return;
-        if (oldIndex == -1)
-            throw 'Not a child';
-        this._children.splice(oldIndex, 1);
-        if (index >= this._children.length) {
-            this._children.push(child);
-            this.appendChild(child);
-        }
-        else {
-            this._children.splice(index, 0, child);
-            if (index < oldIndex)
-                index++;
-            let refNode = this._children[index];
-            this.insertBefore(child, refNode);
-        }
-    }
-    getIndex(child) {
-        return this._children.indexOf(child);
-    }
-    get numChildren() {
-        return this._children.length;
-    }
-    isAncestorOf(child) {
-        if (child == null)
-            return false;
-        var p = child.parent;
-        while (p) {
-            if (p == this)
-                return true;
-            p = p.parent;
-        }
-        return false;
-    }
-    get clipping() {
-        return this._clipping;
-    }
-    set clipping(value) {
-        if (this._clipping != value) {
-            this._clipping = value;
-            if (this._clipping)
-                this.style.overflow = "hidden";
-            else
-                this.style.overflow = "visible";
-        }
-    }
-    init() {
-    }
-    dispose() {
-    }
-    traverseChildren(callback) {
-        callback(this);
-        const children = this._children;
-        for (let i = 0, l = children.length; i < l; i++) {
-            children[i].traverseChildren(callback);
-        }
-    }
-    traverseAncestors(callback) {
-        const parent = this._parent;
-        if (parent) {
-            callback(parent);
-            parent.traverseAncestors(callback);
-        }
-    }
-    broadcastEvent(type, data) {
-        let ev = EventPool.borrow();
-        ev._type = type;
-        ev.data = data;
-        ev._initiator = this;
-        let arr = ev._callChain;
-        this.traverseChildren(obj => {
-            if (obj.$owner && !obj.$owner.isDisposed)
-                arr.push(obj.$owner);
-        });
-        arr.forEach(obj => {
-            obj._dispatchDirect(type, ev);
-        });
-        arr.length = 0;
-        EventPool.returns(ev);
-    }
-    bubbleEvent(initiator, type, data, addChain) {
-        let ev = EventPool.borrow();
-        ev._type = type;
-        ev.data = data;
-        ev._initiator = initiator;
-        let arr = ev._callChain;
-        if (this.$owner)
-            arr.push(this.$owner);
-        this.traverseAncestors(obj => {
-            if (obj.$owner)
-                arr.push(obj.$owner);
-        });
-        let stage = this.stage;
-        for (let i = arr.length - 1; i >= 0; i--) {
-            let obj = arr[i];
-            let col = obj._listeners[type];
-            if (col && col.captures.length > 0) {
-                obj._dispatch(col, ev, true);
-                if (ev._pointerCapture) {
-                    ev._pointerCapture = false;
-                    if (type == "pointer_down")
-                        stage.addPointerMonitor(ev.input.pointerId, obj);
-                }
-            }
-        }
-        if (!ev._stopsPropagation) {
-            for (let i = 0; i < arr.length; i++) {
-                let obj = arr[i];
-                let col = obj._listeners[type];
-                if (col && col.callbacks.length > 0) {
-                    obj._dispatch(col, ev, false);
-                    if (ev._pointerCapture) {
-                        ev._pointerCapture = false;
-                        if (type == "pointer_down")
-                            stage.addPointerMonitor(ev.input.pointerId, obj);
-                    }
-                    if (ev._stopsPropagation)
-                        break;
-                }
-            }
-            if (addChain) {
-                for (let i = 0; i < addChain.length; i++) {
-                    let obj = addChain[i];
-                    if (obj && arr.indexOf(obj) == -1) {
-                        obj._dispatchDirect(type, ev);
-                    }
-                }
-            }
-        }
-        arr.length = 0;
-        EventPool.returns(ev);
-    }
-}
-
-class TextFormat {
-    constructor() {
-        this.size = 0;
-        this.color = 0;
-        this.lineSpacing = 0;
-        this.letterSpacing = 0;
-        this.outline = 0;
-        this.outlineColor = 0;
-        this.shadowOffset = new Vec2();
-        this.shadowColor = 0;
-    }
-    copy(source) {
-        this.size = source.size;
-        this.font = source.font;
-        this.color = source.color;
-        this.lineSpacing = source.lineSpacing;
-        this.letterSpacing = source.letterSpacing;
-        this.bold = source.bold;
-        this.underline = source.underline;
-        this.italic = source.italic;
-        this.strikethrough = source.strikethrough;
-        this.align = source.align;
-        this.outline = source.outline;
-        this.outlineColor = source.outlineColor;
-        this.shadowOffset.copy(source.shadowOffset);
-        this.shadowColor = source.shadowColor;
-    }
-}
-
 var textMeasureHelper = document.createElement("div");
 textMeasureHelper.id = "fgui-text-helper";
 textMeasureHelper.style.position = "absolute";
@@ -17361,124 +17524,6 @@ class TextField extends UIElement {
             this._span.style.whiteSpace = "pre-wrap";
             this._span.style.wordBreak = "break-word";
         }
-    }
-}
-
-var isAnyEditing = false;
-class InputTextField extends UIElement {
-    constructor() {
-        super();
-        this._textFormat = new TextFormat();
-        this._text = "";
-        this._cursor = "auto";
-        this._singleLine = true;
-    }
-    init() {
-        super.init();
-        this.createElement();
-        this.addEventListener("dragstart", (evt) => {
-            if (isAnyEditing) {
-                evt.stopPropagation();
-                evt.preventDefault();
-            }
-        });
-        this.$owner.on("focus_in", () => {
-            this._input.focus();
-        });
-    }
-    get htmlInput() {
-        return this._input;
-    }
-    get textFormat() {
-        return this._textFormat;
-    }
-    applyFormat() {
-        this._input.style.textAlign = this._textFormat.align;
-        this._input.style.verticalAlign = this._textFormat.verticalAlign;
-        this._input.style.fontSize = this._textFormat.size + "px";
-        this._input.style.fontFamily = this._textFormat.font;
-        this._input.style.color = convertToHtmlColor(this._textFormat.color);
-    }
-    get text() {
-        this._text = this._input.value;
-        return this._text;
-    }
-    set text(value) {
-        this._text = value;
-        this._input.value = this._text;
-    }
-    get singleLine() {
-        return this._singleLine;
-    }
-    set singleLine(value) {
-        if (this._singleLine != value) {
-            this._singleLine = value;
-            this.createElement();
-        }
-    }
-    createElement() {
-        let old = this._input;
-        if (old)
-            this.removeChild(old);
-        let e;
-        if (this._singleLine) {
-            e = document.createElement("input");
-        }
-        else {
-            e = document.createElement("textarea");
-        }
-        this._input = e;
-        if (e instanceof HTMLInputElement) {
-            if (this._password)
-                e.type = "password";
-            else
-                e.type = "text";
-        }
-        e.value = this._text;
-        e.readOnly = old ? old.readOnly : false;
-        e.spellcheck = false;
-        e.addEventListener("focus", (evt) => { isAnyEditing = true; this.stage.setFocus(this, true); });
-        e.addEventListener("blur", () => { isAnyEditing = false; });
-        e.addEventListener("input", () => { this.$owner.emit("changed"); });
-        this.appendChild(this._input);
-    }
-    updateTouchableFlag() {
-        super.updateTouchableFlag();
-        if (isAnyEditing)
-            this._input.setSelectionRange(0, 0);
-        this._input.disabled = this.style.pointerEvents == "none";
-    }
-    setPromptText(value) {
-        this._input.placeholder = defaultParser.parse(value, true);
-    }
-    setMaxLength(value) {
-        if (value > 0)
-            this._input.maxLength = value;
-        else
-            this._input.maxLength = 524288;
-    }
-    setKeyboardType(keyboardType) {
-    }
-    setRestrict(value) {
-    }
-    get editable() {
-        return !this._input.readOnly;
-    }
-    set editable(value) {
-        this._input.readOnly = !value;
-    }
-    get password() {
-        return this._password;
-    }
-    set password(value) {
-        if (this._password != value) {
-            this._password = value;
-            if (this._input instanceof HTMLInputElement)
-                this._input.type = value ? "password" : "text";
-        }
-    }
-    setSelection(start, end) {
-        this._input.setSelectionRange(start, end);
     }
 }
 
@@ -19148,4 +19193,4 @@ class XML {
     }
 }
 
-export { AsyncOperation, AutoSizeType, BrowserPackageResourceResolver, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageDisposedError, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, createUnityPackageResourceURLResolver, defaultParser, distance, lerp, repeat };
+export { AsyncOperation, AutoSizeType, BrowserPackageResourceResolver, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FAIRYGUI_DOM_CAPABILITIES, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageDisposedError, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, createUnityPackageResourceURLResolver, defaultParser, distance, getFairyGUIDomCapability, lerp, repeat };
