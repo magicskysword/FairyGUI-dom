@@ -18,6 +18,7 @@ import {
     PackageResourceResolver,
     PackageResourceState,
     PackageSpriteResourceRequest,
+    UIPackageDisposedError,
     UIPackageResourceError
 } from "./PackageResource";
 import {
@@ -25,6 +26,10 @@ import {
 } from "./BrowserPackageResourceResolver";
 
 type PackageDependency = { id: string, name: string };
+type ResolvedPackageResource = {
+    request: PackageFileResourceRequest | PackageSpriteResourceRequest,
+    url: string
+};
 
 export interface UIPackageLoadOptions extends PackageDecodeOptions {
     resourceBaseURL?: string;
@@ -35,6 +40,10 @@ export type UIPackageLoadErrorCode =
     | "PACKAGE_ID_CONFLICT"
     | "PACKAGE_NAME_CONFLICT"
     | "PACKAGE_PATH_CONFLICT"
+    | "PACKAGE_NOT_FOUND"
+    | "PACKAGE_RELOAD_ID_MISMATCH"
+    | "PACKAGE_RELOAD_NAME_MISMATCH"
+    | "PACKAGE_RELOAD_CONFLICT"
     | "INVALID_SPRITE_REFERENCE"
     | "DUPLICATE_SPRITE"
     | "INVALID_PIXEL_HIT_TEST_REFERENCE"
@@ -79,6 +88,7 @@ export class UIPackage {
     private _resourceDiagnostics: Array<PackageResourceDiagnostic>;
     private _resolvedItemAssetURLs: { [index: string]: string };
     private _resolvedSpriteAssetURLs: { [index: string]: string };
+    private _resolvedResources: Array<ResolvedPackageResource>;
 
     /** @internal */
     public _branchIndex: number;
@@ -96,6 +106,7 @@ export class UIPackage {
         this._resourceDiagnostics = [];
         this._resolvedItemAssetURLs = {};
         this._resolvedSpriteAssetURLs = {};
+        this._resolvedResources = [];
         this._branchIndex = -1;
     }
 
@@ -244,12 +255,119 @@ export class UIPackage {
 
         const pkg = new UIPackage();
         pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
-        _instById[pkg.id] = pkg;
-        _instByName[pkg.name] = pkg;
-        if (pkg.path)
-            _instById[pkg.path] = pkg;
+        registerPackage(pkg);
         pkg.startResourceLoading(selectResourceResolver(options));
         return pkg;
+    }
+
+    public static reloadPackageFromBuffer(
+        packageIdOrName: string,
+        data: PackageBinaryData,
+        options: UIPackageLoadOptions = {}
+    ): Promise<UIPackage> {
+        return Promise.resolve().then(() => {
+            const source = options.source || "<memory>";
+            const decoded = PackageDecoder.decode(data, { source });
+            const existing = _instById[packageIdOrName]
+                || _instByName[packageIdOrName];
+            if (!existing) {
+                throw packageLoadError(
+                    "PACKAGE_NOT_FOUND",
+                    source,
+                    decoded,
+                    "Cannot reload package \""
+                        + packageIdOrName
+                        + "\" because it is not registered."
+                );
+            }
+            if (decoded.id !== existing.id) {
+                throw packageLoadError(
+                    "PACKAGE_RELOAD_ID_MISMATCH",
+                    source,
+                    decoded,
+                    "Reloaded package ID \""
+                        + decoded.id
+                        + "\" does not match registered package ID \""
+                        + existing.id
+                        + "\"."
+                );
+            }
+            if (decoded.name !== existing.name) {
+                throw packageLoadError(
+                    "PACKAGE_RELOAD_NAME_MISMATCH",
+                    source,
+                    decoded,
+                    "Reloaded package name \""
+                        + decoded.name
+                        + "\" does not match registered package name \""
+                        + existing.name
+                        + "\"."
+                );
+            }
+
+            const hasResourceBaseURL = Object.prototype.hasOwnProperty.call(
+                options,
+                "resourceBaseURL"
+            );
+            const resourceBaseURL = hasResourceBaseURL
+                ? normalizeResourceBaseURL(options.resourceBaseURL)
+                : existing.path;
+            const pathOwner = resourceBaseURL
+                ? _instById[resourceBaseURL]
+                : null;
+            if (pathOwner && pathOwner !== existing) {
+                throw packageLoadError(
+                    "PACKAGE_PATH_CONFLICT",
+                    source,
+                    decoded,
+                    "Resource base URL \""
+                        + resourceBaseURL
+                        + "\" is already registered by package \""
+                        + pathOwner.name
+                        + "\"."
+                );
+            }
+
+            const candidate = new UIPackage();
+            try {
+                candidate.loadDecodedPackage(
+                    decoded,
+                    resourceBaseURL,
+                    source
+                );
+                candidate.startResourceLoading(
+                    selectResourceResolver(options)
+                );
+            }
+            catch (error) {
+                candidate.dispose();
+                throw error;
+            }
+
+            return candidate.waitForResources()
+                .then(() => {
+                    if (
+                        _instById[existing.id] !== existing
+                        || _instByName[existing.name] !== existing
+                    ) {
+                        throw packageLoadError(
+                            "PACKAGE_RELOAD_CONFLICT",
+                            source,
+                            decoded,
+                            "The registered package changed while reload resources were loading."
+                        );
+                    }
+
+                    unregisterPackage(existing);
+                    registerPackage(candidate);
+                    existing.dispose();
+                    return candidate;
+                })
+                .catch(error => {
+                    candidate.dispose();
+                    throw error;
+                });
+        });
     }
 
     public static removePackage(packageIdOrName: string): void {
@@ -258,11 +376,8 @@ export class UIPackage {
             pkg = _instByName[packageIdOrName];
         if (!pkg)
             throw "No package found: " + packageIdOrName;
+        unregisterPackage(pkg);
         pkg.dispose();
-        delete _instById[pkg.id];
-        delete _instByName[pkg.name];
-        if (pkg._path)
-            delete _instById[pkg._path];
     }
 
     public static createObject<T extends GObject>(pkgName: string, resName: string, userClass?: Constructor<T>): T {
@@ -510,6 +625,8 @@ export class UIPackage {
             .then(() => this.resolveFileResources(resolver))
             .then(() => this.resolveSpriteResources(resolver))
             .then(() => {
+                if (this._resourceState === "disposed")
+                    return;
                 if (this._resourceDiagnostics.length > 0) {
                     this._resourceState = "failed";
                     throw new UIPackageResourceError(
@@ -529,6 +646,9 @@ export class UIPackage {
     private resolveFileResources(
         resolver: PackageResourceResolver
     ): Promise<void> {
+        if (this._resourceState === "disposed")
+            return Promise.resolve();
+
         const tasks = this._items
             .filter(item => !!item.file)
             .map(item => {
@@ -552,6 +672,9 @@ export class UIPackage {
     private resolveSpriteResources(
         resolver: PackageResourceResolver
     ): Promise<void> {
+        if (this._resourceState === "disposed")
+            return Promise.resolve();
+
         const tasks: Array<Promise<void>> = [];
         for (const itemId in this._sprites) {
             const sprite = this._sprites[itemId];
@@ -617,10 +740,19 @@ export class UIPackage {
                     return;
                 }
 
+                if (this._resourceState === "disposed") {
+                    this.releaseResource(resolver, request, resolvedURL);
+                    return;
+                }
+
                 if (request.kind === "file")
                     this._resolvedItemAssetURLs[assetId] = resolvedURL;
                 else
                     this._resolvedSpriteAssetURLs[assetId] = resolvedURL;
+                this._resolvedResources.push({
+                    request,
+                    url: resolvedURL
+                });
             })
             .catch(error => {
                 const detail = error instanceof Error
@@ -647,7 +779,61 @@ export class UIPackage {
     }
 
     public dispose(): void {
+        if (this._resourceState === "disposed")
+            return;
 
+        this._resourceState = "disposed";
+        if (this._resourceResolver) {
+            for (let i = this._resolvedResources.length - 1; i >= 0; i--) {
+                const resource = this._resolvedResources[i];
+                this.releaseResource(
+                    this._resourceResolver,
+                    resource.request,
+                    resource.url
+                );
+            }
+        }
+        this._resolvedResources.length = 0;
+        this._resolvedItemAssetURLs = {};
+        this._resolvedSpriteAssetURLs = {};
+    }
+
+    private releaseResource(
+        resolver: PackageResourceResolver,
+        request: PackageFileResourceRequest | PackageSpriteResourceRequest,
+        resolvedURL: string
+    ): void {
+        if (!resolver.release)
+            return;
+        try {
+            resolver.release(request, resolvedURL);
+        }
+        catch (error) {
+            const detail = error instanceof Error
+                ? error.message
+                : String(error);
+            this._resourceDiagnostics.push({
+                code: "RESOURCE_RELEASE_FAILED",
+                message: "Cannot release "
+                    + request.kind
+                    + " resource \""
+                    + (request.kind === "file"
+                        ? request.item.id
+                        : request.sprite.itemId)
+                    + "\": "
+                    + detail,
+                requestKind: request.kind,
+                itemId: request.kind === "file"
+                    ? request.item.id
+                    : request.sprite.itemId,
+                itemName: request.kind === "file"
+                    ? request.item.name
+                    : request.item
+                        ? request.item.name
+                        : null,
+                sourceURL: request.sourceURL
+            });
+        }
     }
 
     public get id(): string {
@@ -703,6 +889,12 @@ export class UIPackage {
     }
 
     public waitForResources(): Promise<void> {
+        if (this._resourceState === "disposed") {
+            return Promise.reject(new UIPackageDisposedError(
+                this._id,
+                this._name
+            ));
+        }
         return this._resourcePromise;
     }
 
@@ -711,6 +903,8 @@ export class UIPackage {
     }
 
     public getItemAssetURL(item: PackageItem): string {
+        if (this._resourceState === "disposed")
+            throw new UIPackageDisposedError(this._id, this._name);
         if (!item)
             return null;
         return this._resolvedSpriteAssetURLs[item.id]
@@ -719,6 +913,8 @@ export class UIPackage {
     }
 
     public getSpriteAssetURL(itemId: string): string | null {
+        if (this._resourceState === "disposed")
+            throw new UIPackageDisposedError(this._id, this._name);
         return this._resolvedSpriteAssetURLs[itemId] || null;
     }
 }
@@ -742,6 +938,20 @@ function selectResourceResolver(
     if (BrowserPackageResourceResolver.isSupported())
         return new BrowserPackageResourceResolver();
     return null;
+}
+
+function registerPackage(pkg: UIPackage): void {
+    _instById[pkg.id] = pkg;
+    _instByName[pkg.name] = pkg;
+    if (pkg.path)
+        _instById[pkg.path] = pkg;
+}
+
+function unregisterPackage(pkg: UIPackage): void {
+    delete _instById[pkg.id];
+    delete _instByName[pkg.name];
+    if (pkg.path)
+        delete _instById[pkg.path];
 }
 
 function packageLoadError(

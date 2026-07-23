@@ -35,7 +35,8 @@ export interface PackageResourceResolver {
 export type PackageResourceDiagnosticCode =
     | "RESOURCE_RESOLUTION_FAILED"
     | "INVALID_RESOURCE_RESULT"
-    | "ATLAS_RESOURCE_UNAVAILABLE";
+    | "ATLAS_RESOURCE_UNAVAILABLE"
+    | "RESOURCE_RELEASE_FAILED";
 
 export interface PackageResourceDiagnostic {
     readonly code: PackageResourceDiagnosticCode;
@@ -72,5 +73,26 @@ export class UIPackageResourceError extends Error {
         this.packageName = packageName;
         this.diagnostics = diagnostics;
         Object.setPrototypeOf(this, UIPackageResourceError.prototype);
+    }
+}
+
+export class UIPackageDisposedError extends Error {
+    public readonly code: "PACKAGE_DISPOSED";
+    public readonly packageId: string;
+    public readonly packageName: string;
+
+    public constructor(packageId: string, packageName: string) {
+        super(
+            "FairyGUI package \""
+                + packageName
+                + "\" ("
+                + packageId
+                + ") has been disposed."
+        );
+        this.name = "UIPackageDisposedError";
+        this.code = "PACKAGE_DISPOSED";
+        this.packageId = packageId;
+        this.packageName = packageName;
+        Object.setPrototypeOf(this, UIPackageDisposedError.prototype);
     }
 }

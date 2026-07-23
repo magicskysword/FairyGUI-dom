@@ -7,6 +7,7 @@ installDomStubs();
 
 const {
     UIPackage,
+    UIPackageDisposedError,
     UIPackageResourceError
 } = require("../../dist/fairygui.js");
 
@@ -184,6 +185,154 @@ test("reports deterministic diagnostics when an atlas cannot be resolved", async
         assert.equal(pkg.resourceState, "failed");
         assert.equal(pkg.getResourceDiagnostics().length, 2);
         await assert.rejects(pkg.waitForResources(), UIPackageResourceError);
+    }
+    finally {
+        UIPackage.removePackage("d8m5tmok");
+    }
+});
+
+test("releases resolved resources and rejects resource access after disposal", async () => {
+    const released = [];
+    const resolver = {
+        resolve(request) {
+            return request.kind === "file"
+                ? "memory://file/" + request.item.id
+                : "memory://sprite/" + request.sprite.itemId;
+        },
+        release(request, resolvedURL) {
+            released.push({
+                kind: request.kind,
+                itemId: request.kind === "file"
+                    ? request.item.id
+                    : request.sprite.itemId,
+                resolvedURL
+            });
+        }
+    };
+    const pkg = UIPackage.loadPackageFromBuffer(readFixture(), {
+        source: "BundleUsage_fui.bytes",
+        resourceBaseURL: "fixtures/BundleUsage",
+        resourceResolver: resolver
+    });
+    await pkg.waitForResources();
+    const image = pkg.getItemById("fou91");
+
+    UIPackage.removePackage("d8m5tmok");
+    pkg.dispose();
+
+    assert.equal(pkg.resourceState, "disposed");
+    assert.equal(UIPackage.getById("d8m5tmok"), undefined);
+    assert.deepEqual(released, [
+        {
+            kind: "sprite",
+            itemId: "fou91",
+            resolvedURL: "memory://sprite/fou91"
+        },
+        {
+            kind: "file",
+            itemId: "atlas0",
+            resolvedURL: "memory://file/atlas0"
+        }
+    ]);
+    await assert.rejects(
+        pkg.waitForResources(),
+        error => error instanceof UIPackageDisposedError
+            && error.code === "PACKAGE_DISPOSED"
+    );
+    assert.throws(
+        () => pkg.getItemAssetURL(image),
+        UIPackageDisposedError
+    );
+});
+
+test("atomically replaces a loaded package only after reload resources succeed", async () => {
+    const oldReleased = [];
+    const oldPackage = UIPackage.loadPackageFromBuffer(readFixture(), {
+        source: "old/BundleUsage_fui.bytes",
+        resourceBaseURL: "fixtures/BundleUsage",
+        resourceResolver: {
+            resolve(request) {
+                return request.kind === "file"
+                    ? "memory://old-file/" + request.item.id
+                    : "memory://old-sprite/" + request.sprite.itemId;
+            },
+            release(request, resolvedURL) {
+                oldReleased.push(resolvedURL);
+            }
+        }
+    });
+    await oldPackage.waitForResources();
+
+    const reloadPromise = UIPackage.reloadPackageFromBuffer(
+        "d8m5tmok",
+        readFixture(),
+        {
+            source: "new/BundleUsage_fui.bytes",
+            resourceBaseURL: "fixtures/BundleUsage",
+            resourceResolver: {
+                resolve(request) {
+                    return request.kind === "file"
+                        ? "memory://new-file/" + request.item.id
+                        : "memory://new-sprite/" + request.sprite.itemId;
+                }
+            }
+        }
+    );
+
+    assert.equal(UIPackage.getById("d8m5tmok"), oldPackage);
+    const newPackage = await reloadPromise;
+
+    try {
+        assert.notEqual(newPackage, oldPackage);
+        assert.equal(UIPackage.getById("d8m5tmok"), newPackage);
+        assert.equal(UIPackage.getByName("BundleUsage"), newPackage);
+        assert.equal(oldPackage.resourceState, "disposed");
+        assert.deepEqual(oldReleased, [
+            "memory://old-sprite/fou91",
+            "memory://old-file/atlas0"
+        ]);
+        assert.equal(
+            newPackage.getItemAssetURL(newPackage.getItemById("fou91")),
+            "memory://new-sprite/fou91"
+        );
+    }
+    finally {
+        UIPackage.removePackage("d8m5tmok");
+    }
+});
+
+test("keeps the old package registered when reload resources fail", async () => {
+    const oldPackage = UIPackage.loadPackageFromBuffer(readFixture(), {
+        source: "old/BundleUsage_fui.bytes",
+        resourceBaseURL: "fixtures/BundleUsage",
+        resourceResolver: {
+            resolve(request) {
+                return request.sourceURL;
+            }
+        }
+    });
+    await oldPackage.waitForResources();
+
+    try {
+        await assert.rejects(
+            UIPackage.reloadPackageFromBuffer(
+                "BundleUsage",
+                readFixture(),
+                {
+                    source: "broken/BundleUsage_fui.bytes",
+                    resourceBaseURL: "fixtures/BundleUsage",
+                    resourceResolver: {
+                        resolve() {
+                            throw new Error("reload fixture is broken");
+                        }
+                    }
+                }
+            ),
+            UIPackageResourceError
+        );
+
+        assert.equal(UIPackage.getById("d8m5tmok"), oldPackage);
+        assert.equal(oldPackage.resourceState, "ready");
     }
     finally {
         UIPackage.removePackage("d8m5tmok");

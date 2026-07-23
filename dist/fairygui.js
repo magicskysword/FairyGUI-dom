@@ -5098,6 +5098,20 @@
             Object.setPrototypeOf(this, UIPackageResourceError.prototype);
         }
     }
+    class UIPackageDisposedError extends Error {
+        constructor(packageId, packageName) {
+            super("FairyGUI package \""
+                + packageName
+                + "\" ("
+                + packageId
+                + ") has been disposed.");
+            this.name = "UIPackageDisposedError";
+            this.code = "PACKAGE_DISPOSED";
+            this.packageId = packageId;
+            this.packageName = packageName;
+            Object.setPrototypeOf(this, UIPackageDisposedError.prototype);
+        }
+    }
 
     /**
      * Browser resource resolver used by UIPackage when DOM image and canvas APIs
@@ -5243,6 +5257,7 @@
             this._resourceDiagnostics = [];
             this._resolvedItemAssetURLs = {};
             this._resolvedSpriteAssetURLs = {};
+            this._resolvedResources = [];
             this._branchIndex = -1;
         }
         static get branch() {
@@ -5348,12 +5363,74 @@
             }
             const pkg = new UIPackage();
             pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
-            _instById[pkg.id] = pkg;
-            _instByName[pkg.name] = pkg;
-            if (pkg.path)
-                _instById[pkg.path] = pkg;
+            registerPackage(pkg);
             pkg.startResourceLoading(selectResourceResolver(options));
             return pkg;
+        }
+        static reloadPackageFromBuffer(packageIdOrName, data, options = {}) {
+            return Promise.resolve().then(() => {
+                const source = options.source || "<memory>";
+                const decoded = PackageDecoder.decode(data, { source });
+                const existing = _instById[packageIdOrName]
+                    || _instByName[packageIdOrName];
+                if (!existing) {
+                    throw packageLoadError("PACKAGE_NOT_FOUND", source, decoded, "Cannot reload package \""
+                        + packageIdOrName
+                        + "\" because it is not registered.");
+                }
+                if (decoded.id !== existing.id) {
+                    throw packageLoadError("PACKAGE_RELOAD_ID_MISMATCH", source, decoded, "Reloaded package ID \""
+                        + decoded.id
+                        + "\" does not match registered package ID \""
+                        + existing.id
+                        + "\".");
+                }
+                if (decoded.name !== existing.name) {
+                    throw packageLoadError("PACKAGE_RELOAD_NAME_MISMATCH", source, decoded, "Reloaded package name \""
+                        + decoded.name
+                        + "\" does not match registered package name \""
+                        + existing.name
+                        + "\".");
+                }
+                const hasResourceBaseURL = Object.prototype.hasOwnProperty.call(options, "resourceBaseURL");
+                const resourceBaseURL = hasResourceBaseURL
+                    ? normalizeResourceBaseURL(options.resourceBaseURL)
+                    : existing.path;
+                const pathOwner = resourceBaseURL
+                    ? _instById[resourceBaseURL]
+                    : null;
+                if (pathOwner && pathOwner !== existing) {
+                    throw packageLoadError("PACKAGE_PATH_CONFLICT", source, decoded, "Resource base URL \""
+                        + resourceBaseURL
+                        + "\" is already registered by package \""
+                        + pathOwner.name
+                        + "\".");
+                }
+                const candidate = new UIPackage();
+                try {
+                    candidate.loadDecodedPackage(decoded, resourceBaseURL, source);
+                    candidate.startResourceLoading(selectResourceResolver(options));
+                }
+                catch (error) {
+                    candidate.dispose();
+                    throw error;
+                }
+                return candidate.waitForResources()
+                    .then(() => {
+                    if (_instById[existing.id] !== existing
+                        || _instByName[existing.name] !== existing) {
+                        throw packageLoadError("PACKAGE_RELOAD_CONFLICT", source, decoded, "The registered package changed while reload resources were loading.");
+                    }
+                    unregisterPackage(existing);
+                    registerPackage(candidate);
+                    existing.dispose();
+                    return candidate;
+                })
+                    .catch(error => {
+                    candidate.dispose();
+                    throw error;
+                });
+            });
         }
         static removePackage(packageIdOrName) {
             var pkg = _instById[packageIdOrName];
@@ -5361,11 +5438,8 @@
                 pkg = _instByName[packageIdOrName];
             if (!pkg)
                 throw "No package found: " + packageIdOrName;
+            unregisterPackage(pkg);
             pkg.dispose();
-            delete _instById[pkg.id];
-            delete _instByName[pkg.name];
-            if (pkg._path)
-                delete _instById[pkg._path];
         }
         static createObject(pkgName, resName, userClass) {
             var pkg = UIPackage.getByName(pkgName);
@@ -5554,6 +5628,8 @@
                 .then(() => this.resolveFileResources(resolver))
                 .then(() => this.resolveSpriteResources(resolver))
                 .then(() => {
+                if (this._resourceState === "disposed")
+                    return;
                 if (this._resourceDiagnostics.length > 0) {
                     this._resourceState = "failed";
                     throw new UIPackageResourceError(this._id, this._name, this._resourceDiagnostics.slice());
@@ -5565,6 +5641,8 @@
             this._resourcePromise.catch(() => undefined);
         }
         resolveFileResources(resolver) {
+            if (this._resourceState === "disposed")
+                return Promise.resolve();
             const tasks = this._items
                 .filter(item => !!item.file)
                 .map(item => {
@@ -5580,6 +5658,8 @@
             return Promise.all(tasks).then(() => undefined);
         }
         resolveSpriteResources(resolver) {
+            if (this._resourceState === "disposed")
+                return Promise.resolve();
             const tasks = [];
             for (const itemId in this._sprites) {
                 const sprite = this._sprites[itemId];
@@ -5633,10 +5713,18 @@
                     });
                     return;
                 }
+                if (this._resourceState === "disposed") {
+                    this.releaseResource(resolver, request, resolvedURL);
+                    return;
+                }
                 if (request.kind === "file")
                     this._resolvedItemAssetURLs[assetId] = resolvedURL;
                 else
                     this._resolvedSpriteAssetURLs[assetId] = resolvedURL;
+                this._resolvedResources.push({
+                    request,
+                    url: resolvedURL
+                });
             })
                 .catch(error => {
                 const detail = error instanceof Error
@@ -5662,6 +5750,51 @@
             });
         }
         dispose() {
+            if (this._resourceState === "disposed")
+                return;
+            this._resourceState = "disposed";
+            if (this._resourceResolver) {
+                for (let i = this._resolvedResources.length - 1; i >= 0; i--) {
+                    const resource = this._resolvedResources[i];
+                    this.releaseResource(this._resourceResolver, resource.request, resource.url);
+                }
+            }
+            this._resolvedResources.length = 0;
+            this._resolvedItemAssetURLs = {};
+            this._resolvedSpriteAssetURLs = {};
+        }
+        releaseResource(resolver, request, resolvedURL) {
+            if (!resolver.release)
+                return;
+            try {
+                resolver.release(request, resolvedURL);
+            }
+            catch (error) {
+                const detail = error instanceof Error
+                    ? error.message
+                    : String(error);
+                this._resourceDiagnostics.push({
+                    code: "RESOURCE_RELEASE_FAILED",
+                    message: "Cannot release "
+                        + request.kind
+                        + " resource \""
+                        + (request.kind === "file"
+                            ? request.item.id
+                            : request.sprite.itemId)
+                        + "\": "
+                        + detail,
+                    requestKind: request.kind,
+                    itemId: request.kind === "file"
+                        ? request.item.id
+                        : request.sprite.itemId,
+                    itemName: request.kind === "file"
+                        ? request.item.name
+                        : request.item
+                            ? request.item.name
+                            : null,
+                    sourceURL: request.sourceURL
+                });
+            }
         }
         get id() {
             return this._id;
@@ -5704,12 +5837,17 @@
             return this._sprites[itemId] || null;
         }
         waitForResources() {
+            if (this._resourceState === "disposed") {
+                return Promise.reject(new UIPackageDisposedError(this._id, this._name));
+            }
             return this._resourcePromise;
         }
         getResourceDiagnostics() {
             return this._resourceDiagnostics.slice();
         }
         getItemAssetURL(item) {
+            if (this._resourceState === "disposed")
+                throw new UIPackageDisposedError(this._id, this._name);
             if (!item)
                 return null;
             return this._resolvedSpriteAssetURLs[item.id]
@@ -5717,6 +5855,8 @@
                 || item.file;
         }
         getSpriteAssetURL(itemId) {
+            if (this._resourceState === "disposed")
+                throw new UIPackageDisposedError(this._id, this._name);
             return this._resolvedSpriteAssetURLs[itemId] || null;
         }
     }
@@ -5735,6 +5875,18 @@
         if (BrowserPackageResourceResolver.isSupported())
             return new BrowserPackageResourceResolver();
         return null;
+    }
+    function registerPackage(pkg) {
+        _instById[pkg.id] = pkg;
+        _instByName[pkg.name] = pkg;
+        if (pkg.path)
+            _instById[pkg.path] = pkg;
+    }
+    function unregisterPackage(pkg) {
+        delete _instById[pkg.id];
+        delete _instByName[pkg.name];
+        if (pkg.path)
+            delete _instById[pkg.path];
     }
     function packageLoadError(code, source, decoded, detail) {
         return new UIPackageLoadError(code, "Cannot load FairyGUI package from \""
@@ -18999,6 +19151,7 @@
     exports.UIElement = UIElement;
     exports.UIObjectFactory = UIObjectFactory$1;
     exports.UIPackage = UIPackage;
+    exports.UIPackageDisposedError = UIPackageDisposedError;
     exports.UIPackageLoadError = UIPackageLoadError;
     exports.UIPackageResourceError = UIPackageResourceError;
     exports.Vec2 = Vec2;

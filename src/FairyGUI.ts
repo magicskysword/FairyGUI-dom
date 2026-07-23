@@ -44,7 +44,8 @@ export {
     PackageResourceResolver,
     PackageResourceDiagnosticCode,
     PackageResourceDiagnostic,
-    UIPackageResourceError
+    UIPackageResourceError,
+    UIPackageDisposedError
 } from "./ui/PackageResource";
 export {
     BrowserPackageResourceResolver
