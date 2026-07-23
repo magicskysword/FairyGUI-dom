@@ -6,6 +6,7 @@ const { test } = require("node:test");
 installDomStubs();
 
 const {
+    createUnityPackageResourceURLResolver,
     UIPackage,
     UIPackageDisposedError,
     UIPackageResourceError
@@ -132,6 +133,58 @@ test("resolves package files and atlas sprites through one injectable resolver",
     finally {
         UIPackage.removePackage("d8m5tmok");
     }
+});
+
+test("maps Unity-prefixed resource file names before browser resolution", async () => {
+    const requests = [];
+    const pkg = UIPackage.loadPackageFromBuffer(readFixture(), {
+        source: "BundleUsage_fui.bytes",
+        resourceBaseURL: "release",
+        resourceURLResolver: createUnityPackageResourceURLResolver(),
+        resourceResolver: {
+            resolve(request) {
+                requests.push(request);
+                return request.kind === "file"
+                    ? request.sourceURL
+                    : "memory://sprite/" + request.sprite.itemId;
+            }
+        }
+    });
+
+    try {
+        await pkg.waitForResources();
+        assert.equal(
+            requests[0].sourceURL,
+            "release/BundleUsage_atlas0.png"
+        );
+        assert.equal(
+            pkg.getItemAssetURL(pkg.getItemById("atlas0")),
+            "release/BundleUsage_atlas0.png"
+        );
+    }
+    finally {
+        UIPackage.removePackage("d8m5tmok");
+    }
+});
+
+test("rejects an empty custom resource URL before package registration", () => {
+    assert.throws(
+        () => UIPackage.loadPackageFromBuffer(readFixture(), {
+            source: "BundleUsage_fui.bytes",
+            resourceBaseURL: "release",
+            resourceURLResolver() {
+                return "";
+            },
+            resourceResolver: null
+        }),
+        error => {
+            assert.equal(error.name, "UIPackageLoadError");
+            assert.equal(error.code, "INVALID_RESOURCE_URL");
+            assert.equal(error.packageId, "d8m5tmok");
+            return true;
+        }
+    );
+    assert.equal(UIPackage.getById("d8m5tmok"), undefined);
 });
 
 test("reports deterministic diagnostics when an atlas cannot be resolved", async () => {

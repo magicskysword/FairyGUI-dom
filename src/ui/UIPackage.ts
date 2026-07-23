@@ -17,6 +17,7 @@ import {
     PackageResourceDiagnostic,
     PackageResourceResolver,
     PackageResourceState,
+    PackageResourceURLResolver,
     PackageSpriteResourceRequest,
     UIPackageDisposedError,
     UIPackageResourceError
@@ -33,6 +34,7 @@ type ResolvedPackageResource = {
 
 export interface UIPackageLoadOptions extends PackageDecodeOptions {
     resourceBaseURL?: string;
+    resourceURLResolver?: PackageResourceURLResolver;
     resourceResolver?: PackageResourceResolver;
 }
 
@@ -44,6 +46,7 @@ export type UIPackageLoadErrorCode =
     | "PACKAGE_RELOAD_ID_MISMATCH"
     | "PACKAGE_RELOAD_NAME_MISMATCH"
     | "PACKAGE_RELOAD_CONFLICT"
+    | "INVALID_RESOURCE_URL"
     | "INVALID_SPRITE_REFERENCE"
     | "DUPLICATE_SPRITE"
     | "INVALID_PIXEL_HIT_TEST_REFERENCE"
@@ -254,7 +257,12 @@ export class UIPackage {
         }
 
         const pkg = new UIPackage();
-        pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
+        pkg.loadDecodedPackage(
+            decoded,
+            resourceBaseURL,
+            source,
+            options.resourceURLResolver || null
+        );
         registerPackage(pkg);
         pkg.startResourceLoading(selectResourceResolver(options));
         return pkg;
@@ -333,7 +341,8 @@ export class UIPackage {
                 candidate.loadDecodedPackage(
                     decoded,
                     resourceBaseURL,
-                    source
+                    source,
+                    options.resourceURLResolver || null
                 );
                 candidate.startResourceLoading(
                     selectResourceResolver(options)
@@ -456,7 +465,8 @@ export class UIPackage {
     private loadDecodedPackage(
         decoded: DecodedPackage,
         resourceBaseURL: string,
-        source: string
+        source: string,
+        resourceURLResolver: PackageResourceURLResolver | null = null
     ): void {
         this._path = resourceBaseURL;
         this._id = decoded.id;
@@ -478,9 +488,53 @@ export class UIPackage {
             pi.type = decodedItem.type;
             pi.id = decodedItem.id;
             pi.name = decodedItem.name;
-            pi.file = decodedItem.file == null
-                ? null
-                : resourceBaseURL + decodedItem.file;
+            if (decodedItem.file == null) {
+                pi.file = null;
+            }
+            else {
+                const defaultURL = resourceBaseURL + decodedItem.file;
+                if (resourceURLResolver) {
+                    let resolvedURL: string;
+                    try {
+                        resolvedURL = resourceURLResolver({
+                            packageId: decoded.id,
+                            packageName: decoded.name,
+                            item: pi,
+                            fileName: decodedItem.file,
+                            resourceBaseURL,
+                            defaultURL
+                        });
+                    }
+                    catch (error) {
+                        const detail = error instanceof Error
+                            ? error.message
+                            : String(error);
+                        throw packageLoadError(
+                            "INVALID_RESOURCE_URL",
+                            source,
+                            decoded,
+                            "Resource URL resolver failed for item \""
+                                + pi.id
+                                + "\": "
+                                + detail
+                        );
+                    }
+                    if (typeof resolvedURL !== "string" || !resolvedURL) {
+                        throw packageLoadError(
+                            "INVALID_RESOURCE_URL",
+                            source,
+                            decoded,
+                            "Resource URL resolver returned an empty or non-string URL for item \""
+                                + pi.id
+                                + "\"."
+                        );
+                    }
+                    pi.file = resolvedURL;
+                }
+                else {
+                    pi.file = defaultURL;
+                }
+            }
             pi.width = decodedItem.width;
             pi.height = decodedItem.height;
             pi.objectType = decodedItem.objectType;

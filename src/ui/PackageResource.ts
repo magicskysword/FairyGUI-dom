@@ -1,4 +1,39 @@
 import { PackageItem, PackageItemSprite } from "./PackageItem";
+import { PackageItemType } from "./FieldTypes";
+
+export interface PackageResourceURLRequest {
+    readonly packageId: string;
+    readonly packageName: string;
+    readonly item: PackageItem;
+    readonly fileName: string;
+    readonly resourceBaseURL: string;
+    readonly defaultURL: string;
+}
+
+export type PackageResourceURLResolver = (
+    request: PackageResourceURLRequest
+) => string;
+
+export function createUnityPackageResourceURLResolver(
+    assetNamePrefix?: string
+): PackageResourceURLResolver {
+    return request => {
+        if (
+            request.item.type !== PackageItemType.Atlas
+            && request.item.type !== PackageItemType.Sound
+            && request.item.type !== PackageItemType.Misc
+        ) {
+            return request.defaultURL;
+        }
+
+        const prefix = assetNamePrefix === undefined
+            ? request.packageName
+            : assetNamePrefix;
+        return request.resourceBaseURL
+            + (prefix ? prefix + "_" : "")
+            + request.fileName;
+    };
+}
 
 export type PackageResourceState =
     | "ready"

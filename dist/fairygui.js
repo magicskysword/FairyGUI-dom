@@ -5081,6 +5081,21 @@
         return bytes;
     }
 
+    function createUnityPackageResourceURLResolver(assetNamePrefix) {
+        return request => {
+            if (request.item.type !== exports.PackageItemType.Atlas
+                && request.item.type !== exports.PackageItemType.Sound
+                && request.item.type !== exports.PackageItemType.Misc) {
+                return request.defaultURL;
+            }
+            const prefix = assetNamePrefix === undefined
+                ? request.packageName
+                : assetNamePrefix;
+            return request.resourceBaseURL
+                + (prefix ? prefix + "_" : "")
+                + request.fileName;
+        };
+    }
     class UIPackageResourceError extends Error {
         constructor(packageId, packageName, diagnostics) {
             super("Cannot finish loading resources for FairyGUI package \""
@@ -5362,7 +5377,7 @@
                 }
             }
             const pkg = new UIPackage();
-            pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
+            pkg.loadDecodedPackage(decoded, resourceBaseURL, source, options.resourceURLResolver || null);
             registerPackage(pkg);
             pkg.startResourceLoading(selectResourceResolver(options));
             return pkg;
@@ -5408,7 +5423,7 @@
                 }
                 const candidate = new UIPackage();
                 try {
-                    candidate.loadDecodedPackage(decoded, resourceBaseURL, source);
+                    candidate.loadDecodedPackage(decoded, resourceBaseURL, source, options.resourceURLResolver || null);
                     candidate.startResourceLoading(selectResourceResolver(options));
                 }
                 catch (error) {
@@ -5502,7 +5517,7 @@
             var srcName = url.substr(pos2 + 1);
             return UIPackage.getItemURL(pkgName, srcName);
         }
-        loadDecodedPackage(decoded, resourceBaseURL, source) {
+        loadDecodedPackage(decoded, resourceBaseURL, source, resourceURLResolver = null) {
             this._path = resourceBaseURL;
             this._id = decoded.id;
             this._name = decoded.name;
@@ -5521,9 +5536,43 @@
                 pi.type = decodedItem.type;
                 pi.id = decodedItem.id;
                 pi.name = decodedItem.name;
-                pi.file = decodedItem.file == null
-                    ? null
-                    : resourceBaseURL + decodedItem.file;
+                if (decodedItem.file == null) {
+                    pi.file = null;
+                }
+                else {
+                    const defaultURL = resourceBaseURL + decodedItem.file;
+                    if (resourceURLResolver) {
+                        let resolvedURL;
+                        try {
+                            resolvedURL = resourceURLResolver({
+                                packageId: decoded.id,
+                                packageName: decoded.name,
+                                item: pi,
+                                fileName: decodedItem.file,
+                                resourceBaseURL,
+                                defaultURL
+                            });
+                        }
+                        catch (error) {
+                            const detail = error instanceof Error
+                                ? error.message
+                                : String(error);
+                            throw packageLoadError("INVALID_RESOURCE_URL", source, decoded, "Resource URL resolver failed for item \""
+                                + pi.id
+                                + "\": "
+                                + detail);
+                        }
+                        if (typeof resolvedURL !== "string" || !resolvedURL) {
+                            throw packageLoadError("INVALID_RESOURCE_URL", source, decoded, "Resource URL resolver returned an empty or non-string URL for item \""
+                                + pi.id
+                                + "\".");
+                        }
+                        pi.file = resolvedURL;
+                    }
+                    else {
+                        pi.file = defaultURL;
+                    }
+                }
                 pi.width = decodedItem.width;
                 pi.height = decodedItem.height;
                 pi.objectType = decodedItem.objectType;
@@ -19161,6 +19210,7 @@
     exports.clamp = clamp;
     exports.clamp01 = clamp01;
     exports.convertToHtmlColor = convertToHtmlColor;
+    exports.createUnityPackageResourceURLResolver = createUnityPackageResourceURLResolver;
     exports.defaultParser = defaultParser;
     exports.distance = distance;
     exports.lerp = lerp;

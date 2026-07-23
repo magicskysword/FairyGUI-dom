@@ -5096,6 +5096,21 @@ function readBytes(buffer, count, source, rootByteOffset) {
     return bytes;
 }
 
+function createUnityPackageResourceURLResolver(assetNamePrefix) {
+    return request => {
+        if (request.item.type !== PackageItemType.Atlas
+            && request.item.type !== PackageItemType.Sound
+            && request.item.type !== PackageItemType.Misc) {
+            return request.defaultURL;
+        }
+        const prefix = assetNamePrefix === undefined
+            ? request.packageName
+            : assetNamePrefix;
+        return request.resourceBaseURL
+            + (prefix ? prefix + "_" : "")
+            + request.fileName;
+    };
+}
 class UIPackageResourceError extends Error {
     constructor(packageId, packageName, diagnostics) {
         super("Cannot finish loading resources for FairyGUI package \""
@@ -5377,7 +5392,7 @@ class UIPackage {
             }
         }
         const pkg = new UIPackage();
-        pkg.loadDecodedPackage(decoded, resourceBaseURL, source);
+        pkg.loadDecodedPackage(decoded, resourceBaseURL, source, options.resourceURLResolver || null);
         registerPackage(pkg);
         pkg.startResourceLoading(selectResourceResolver(options));
         return pkg;
@@ -5423,7 +5438,7 @@ class UIPackage {
             }
             const candidate = new UIPackage();
             try {
-                candidate.loadDecodedPackage(decoded, resourceBaseURL, source);
+                candidate.loadDecodedPackage(decoded, resourceBaseURL, source, options.resourceURLResolver || null);
                 candidate.startResourceLoading(selectResourceResolver(options));
             }
             catch (error) {
@@ -5517,7 +5532,7 @@ class UIPackage {
         var srcName = url.substr(pos2 + 1);
         return UIPackage.getItemURL(pkgName, srcName);
     }
-    loadDecodedPackage(decoded, resourceBaseURL, source) {
+    loadDecodedPackage(decoded, resourceBaseURL, source, resourceURLResolver = null) {
         this._path = resourceBaseURL;
         this._id = decoded.id;
         this._name = decoded.name;
@@ -5536,9 +5551,43 @@ class UIPackage {
             pi.type = decodedItem.type;
             pi.id = decodedItem.id;
             pi.name = decodedItem.name;
-            pi.file = decodedItem.file == null
-                ? null
-                : resourceBaseURL + decodedItem.file;
+            if (decodedItem.file == null) {
+                pi.file = null;
+            }
+            else {
+                const defaultURL = resourceBaseURL + decodedItem.file;
+                if (resourceURLResolver) {
+                    let resolvedURL;
+                    try {
+                        resolvedURL = resourceURLResolver({
+                            packageId: decoded.id,
+                            packageName: decoded.name,
+                            item: pi,
+                            fileName: decodedItem.file,
+                            resourceBaseURL,
+                            defaultURL
+                        });
+                    }
+                    catch (error) {
+                        const detail = error instanceof Error
+                            ? error.message
+                            : String(error);
+                        throw packageLoadError("INVALID_RESOURCE_URL", source, decoded, "Resource URL resolver failed for item \""
+                            + pi.id
+                            + "\": "
+                            + detail);
+                    }
+                    if (typeof resolvedURL !== "string" || !resolvedURL) {
+                        throw packageLoadError("INVALID_RESOURCE_URL", source, decoded, "Resource URL resolver returned an empty or non-string URL for item \""
+                            + pi.id
+                            + "\".");
+                    }
+                    pi.file = resolvedURL;
+                }
+                else {
+                    pi.file = defaultURL;
+                }
+            }
             pi.width = decodedItem.width;
             pi.height = decodedItem.height;
             pi.objectType = decodedItem.objectType;
@@ -19099,4 +19148,4 @@ class XML {
     }
 }
 
-export { AsyncOperation, AutoSizeType, BrowserPackageResourceResolver, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageDisposedError, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, defaultParser, distance, lerp, repeat };
+export { AsyncOperation, AutoSizeType, BrowserPackageResourceResolver, ButtonMode, ByteBuffer, ChildrenRenderOrder, Color, ColorMatrix, Controller, DragDropManager, EaseType, Event, EventDispatcher, FillMethod, FillOrigin, FillOrigin90, FlipType, GButton, GComboBox, GComponent, GGraph, GGroup, GImage, GLabel, GList, GLoader, GLoader3D, GMovieClip, GObject, GObjectPool, GProgressBar, GRichTextField, GRoot$1 as GRoot, GScrollBar, GSlider, GTextField, GTextInput, GTree, GTreeNode, GTween, GTweener, GWindow, GearAnimation, GearBase, GearColor, GearDisplay, GearDisplay2, GearFontSize, GearIcon, GearLook, GearSize, GearText, GearXY, GroupLayoutType, Image, InputTextField, ListLayoutType, ListSelectionMode, LoaderFillType, Margin, MovieClip, ObjectPropID, ObjectType, OverflowType, PackageDecodeError, PackageDecoder, PackageItem, PackageItemType, Pool, PopupDirection, PopupMenu, ProgressTitleType, Rect, RelationType, ScrollBarDisplayType, ScrollPane, ScrollType, Stage, TextField, TextFormat, Timers, Transition, TranslationHelper, UBBParser, UIConfig, UIElement, UIObjectFactory$1 as UIObjectFactory, UIPackage, UIPackageDisposedError, UIPackageLoadError, UIPackageResourceError, Vec2, XML, XMLIterator, XMLUtils, clamp, clamp01, convertToHtmlColor, createUnityPackageResourceURLResolver, defaultParser, distance, lerp, repeat };

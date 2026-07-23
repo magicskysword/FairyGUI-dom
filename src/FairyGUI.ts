@@ -38,6 +38,9 @@ export {
 } from "./ui/PackageItem";
 export {
     PackageResourceState,
+    PackageResourceURLRequest,
+    PackageResourceURLResolver,
+    createUnityPackageResourceURLResolver,
     PackageFileResourceRequest,
     PackageSpriteResourceRequest,
     PackageResourceRequest,
