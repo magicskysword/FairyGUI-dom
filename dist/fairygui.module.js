@@ -18035,8 +18035,8 @@ class Stage extends UIElement {
         doc.addEventListener('dragover', ev => this.handlePointer(ev, 2), { passive: false });
         doc.addEventListener('wheel', ev => this.handleWheel(ev), { passive: false });
         doc.body.insertAdjacentHTML("afterbegin", `<style>
-            .fgui-link { color:#3A67CC }
-            .fgui-link:hover { color:#3A67CC }
+            .fgui-link { color:inherit }
+            .fgui-link:hover { color:inherit }
 
             .fgui-stage {
                 -moz-user-select: none;
