@@ -22,3 +22,21 @@ test("published dependencies use portable registry semver references", () => {
     }
 });
 
+test("npm trusted publishing is tokenless and version-gated", () => {
+    const workflow = fs.readFileSync(
+        path.join(root, ".github", "workflows", "publish.yml"),
+        "utf8"
+    );
+
+    assert.match(workflow, /tags:\s*\r?\n\s*-\s*["']npm-v\*["']/);
+    assert.match(workflow, /id-token:\s*write/);
+    assert.match(workflow, /contents:\s*read/);
+    assert.match(workflow, /actions\/checkout@v6/);
+    assert.match(workflow, /actions\/setup-node@v6/);
+    assert.match(workflow, /node-version:\s*["']24["']/);
+    assert.match(workflow, /package-manager-cache:\s*false/);
+    assert.match(workflow, /package\.json/);
+    assert.match(workflow, /pnpm test/);
+    assert.match(workflow, /npm publish \. --access public/);
+    assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN|NPM_TOKEN|--provenance/);
+});

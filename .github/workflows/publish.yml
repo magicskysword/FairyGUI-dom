@@ -1,0 +1,57 @@
+name: Publish npm package
+
+on:
+  push:
+    tags:
+      - 'npm-v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish fairygui-dom
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Verify release tag
+        shell: bash
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          expected_tag="npm-v${package_version}"
+
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} must equal ${expected_tag}"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests and build
+        run: pnpm test
+
+      - name: Publish package
+        shell: bash
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          if npm view "@magicskysword/fairygui-dom@${package_version}" version >/dev/null 2>&1; then
+            echo "@magicskysword/fairygui-dom@${package_version} is already published"
+          else
+            npm publish . --access public
+          fi
