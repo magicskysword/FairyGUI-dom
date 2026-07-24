@@ -74,7 +74,10 @@ export class PackageItem {
 
     public getHighResolution(): PackageItem {
         if (this.highResolution && UIConfig.scaleLevel > 0) {
-            var itemId: string = this.highResolution[UIConfig.scaleLevel - 1];
+            var index: number = UIConfig.scaleLevel - 1;
+            if (index >= this.highResolution.length)
+                index = this.highResolution.length - 1;
+            var itemId: string = this.highResolution[index];
             if (itemId)
                 return this.owner.getItemById(itemId);
         }

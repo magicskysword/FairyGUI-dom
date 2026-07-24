@@ -4485,7 +4485,10 @@ class PackageItem {
     }
     getHighResolution() {
         if (this.highResolution && UIConfig.scaleLevel > 0) {
-            var itemId = this.highResolution[UIConfig.scaleLevel - 1];
+            var index = UIConfig.scaleLevel - 1;
+            if (index >= this.highResolution.length)
+                index = this.highResolution.length - 1;
+            var itemId = this.highResolution[index];
             if (itemId)
                 return this.owner.getItemById(itemId);
         }
