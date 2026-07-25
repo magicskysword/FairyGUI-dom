@@ -2,6 +2,7 @@ import { FillMethod } from "../ui/FieldTypes";
 import { UIElement } from "./UIElement";
 import { Vec2 } from "../math/Vec2";
 import { Margin } from "../math/Margin";
+import { fillImage } from "./FillUtils";
 
 export class Image extends UIElement {
     protected _src: string;
@@ -10,6 +11,10 @@ export class Image extends UIElement {
     protected _scale9Grid: Margin;
     protected _textureScale: Vec2;
     protected _tileGridIndice: number = 0;
+    protected _fillMethod: number = FillMethod.None;
+    protected _fillOrigin: number = 0;
+    protected _fillClockwise: boolean = true;
+    protected _fillAmount: number = 1;
 
     private _timerID_1: number = 0;
 
@@ -87,32 +92,78 @@ export class Image extends UIElement {
     }
 
     public get fillMethod(): number {
-        return FillMethod.None;
+        return this._fillMethod;
     }
 
     public set fillMethod(value: number) {
-
+        if (this._fillMethod != value) {
+            this._fillMethod = value;
+            this.updateFill();
+        }
     }
 
     public get fillOrigin(): number {
-        return 0;
+        return this._fillOrigin;
     }
 
     public set fillOrigin(value: number) {
+        if (this._fillOrigin != value) {
+            this._fillOrigin = value;
+            this.updateFill();
+        }
     }
 
     public get fillClockwise(): boolean {
-        return true;
+        return this._fillClockwise;
     }
 
     public set fillClockwise(value: boolean) {
+        if (this._fillClockwise != value) {
+            this._fillClockwise = value;
+            this.updateFill();
+        }
     }
 
     public get fillAmount(): number {
-        return 0;
+        return this._fillAmount;
     }
 
     public set fillAmount(value: number) {
+        if (this._fillAmount != value) {
+            this._fillAmount = value;
+            this.updateFill();
+        }
+    }
+
+    protected onSizeChanged(): void {
+        super.onSizeChanged();
+        this.updateFill();
+    }
+
+    protected updateFill(): void {
+        const amount = Math.max(0, Math.min(1, this._fillAmount));
+        if (this._fillMethod === FillMethod.None || amount >= 0.9999) {
+            this.style.clipPath = "none";
+            return;
+        }
+
+        const points = fillImage(
+            this.width,
+            this.height,
+            this._fillMethod,
+            this._fillOrigin,
+            this._fillClockwise,
+            amount
+        );
+        if (!points) {
+            this.style.clipPath = "polygon(0px 0px, 0px 0px, 0px 0px)";
+            return;
+        }
+
+        const cssPoints: string[] = [];
+        for (let index = 0; index < points.length; index += 2)
+            cssPoints.push(`${points[index]}px ${points[index + 1]}px`);
+        this.style.clipPath = `polygon(${cssPoints.join(", ")})`;
     }
 
     protected updateFilters(): void {
