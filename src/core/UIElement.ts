@@ -127,13 +127,13 @@ export class UIElement extends HTMLDivElement {
         return this._pivot.y;
     }
     public set pivotY(value: number) {
-        this.setPosition(this._pivot.x, value);
+        this.setPivot(this._pivot.x, value);
     }
 
     public setPivot(xv: number, yv: number): void {
         if (this._pivot.x != xv || this._pivot.y != yv) {
             this._pivot.set(xv, yv);
-            this.style.transformOrigin = this._pivot.x + "%," + this._pivot.y + "%";
+            this.style.transformOrigin = (this._pivot.x * 100) + "% " + (this._pivot.y * 100) + "%";
         }
     }
 
@@ -188,7 +188,7 @@ export class UIElement extends HTMLDivElement {
             if (str.length > 0) {
                 this.style.transform = str.join("");
                 if (this._flipX || this._flipY)
-                    this.style.transformOrigin = "%50 %50";
+                    this.style.transformOrigin = "50% 50%";
                 else
                     this.style.transformOrigin = (this._pivot.x * 100) + "% " + (this._pivot.y * 100) + "%";
             }
